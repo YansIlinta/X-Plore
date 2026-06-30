@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>弹幕系统</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+
+.header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid #0f3460; }
+.header label { font-size: 13px; color: #a0a0b0; }
+.header input { background: #0f3460; border: 1px solid #533483; color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 120px; }
+.header button { background: #533483; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.header button:hover { background: #6a42a0; }
+.header button.disconnect { background: #e94560; }
+
+.status-bar { background: #0f3460; padding: 8px 20px; font-size: 12px; color: #a0a0b0; display: flex; gap: 20px; }
+.status-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.dot.connected { background: #4ecca3; }
+.dot.disconnected { background: #e94560; }
+
+.messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; }
+.msg { padding: 4px 0; font-size: 14px; line-height: 1.5; }
+.msg .uid { color: #4ecca3; font-weight: 600; margin-right: 8px; }
+.msg .time { color: #666; font-size: 11px; margin-right: 8px; }
+.msg .content { color: #ddd; }
+.msg.system { color: #e94560; font-style: italic; }
+
+.input-bar { background: #16213e; padding: 12px 20px; display: flex; gap: 10px; border-top: 1px solid #0f3460; }
+.input-bar input { flex: 1; background: #0f3460; border: 1px solid #533483; color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 14px; }
+.input-bar button { background: #533483; color: #fff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.input-bar button:hover { background: #6a42a0; }
+.input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <label>房间ID <input id="roomInput" value="room-1" /></label>
+  <label>用户ID <input id="uidInput" value="" /></label>
+  <label>Token <input id="tokenInput" value="danmu-secret-token" type="password" /></label>
+  <button id="connectBtn" onclick="toggleConnect()">连接</button>
+</div>
+
+<div class="status-bar">
+  <span><span class="dot disconnected" id="statusDot"></span><span id="statusText">未连接</span></span>
+  <span>在线人数: <span id="onlineCount">-</span></span>
+  <span>房间: <span id="roomName">-</span></span>
+</div>
+
+<div class="messages" id="messages"></div>
+
+<div class="input-bar">
+  <input id="msgInput" placeholder="输入弹幕内容..." disabled onkeydown="if(event.key==='Enter')sendMsg()" />
+  <button id="sendBtn" onclick="sendMsg()" disabled>发送</button>
+</div>
+
+<script>
+let ws = null;
+let connected = false;
+let pollTimer = null;
+
+// 自动生成 uid
+if (!document.getElementById('uidInput').value) {
+  document.getElementById('uidInput').value = 'user-' + Math.floor(Math.random() * 100000);
+}
+
+function getWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = location.host || 'localhost:8080';
+  const room = document.getElementById('roomInput').value.trim();
+  const uid = document.getElementById('uidInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  return `${proto}//${host}/ws?uid=${encodeURIComponent(uid)}&room=${encodeURIComponent(room)}&token=${encodeURIComponent(token)}`;
+}
+
+function toggleConnect() {
+  if (connected) {
+    disconnect();
+  } else {
+    connect();
+  }
+}
+
+function connect() {
+  if (ws) ws.close();
+
+  const url = getWsUrl();
+  addSystemMsg('正在连接...');
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    connected = true;
+    document.getElementById('statusDot').className = 'dot connected';
+    document.getElementById('statusText').textContent = '已连接';
+    document.getElementById('connectBtn').textContent = '断开';
+    document.getElementById('connectBtn').className = 'disconnect';
+    document.getElementById('msgInput').disabled = false;
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('roomName').textContent = document.getElementById('roomInput').value;
+    addSystemMsg('连接成功');
+    startPolling();
+  };
+
+  ws.onmessage = (evt) => {
+    let msgs;
+    try {
+      const data = JSON.parse(evt.data);
+      msgs = Array.isArray(data) ? data : [data];
+    } catch (e) {
+      return;
+    }
+    msgs.forEach(msg => {
+      if (msg.type === 'rate_limited') {
+        addSystemMsg('发送速率超限，消息被丢弃');
+        return;
+      }
+      addDanmu(msg);
+    });
+  };
+
+  ws.onclose = (evt) => {
+    connected = false;
+    document.getElementById('statusDot').className = 'dot disconnected';
+    document.getElementById('statusText').textContent = '已断开';
+    document.getElementById('connectBtn').textContent = '连接';
+    document.getElementById('connectBtn').className = '';
+    document.getElementById('msgInput').disabled = true;
+    document.getElementById('sendBtn').disabled = true;
+    addSystemMsg(`连接关闭 (code=${evt.code} reason=${evt.reason || 'none'})`);
+    stopPolling();
+  };
+
+  ws.onerror = () => {
+    addSystemMsg('连接错误');
+  };
+}
+
+function disconnect() {
+  if (ws) {
+    ws.close(1000, 'user disconnect');
+    ws = null;
+  }
+}
+
+function sendMsg() {
+  const input = document.getElementById('msgInput');
+  const content = input.value.trim();
+  if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const msg = {
+    type: 'danmu',
+    content: content,
+    client_ts: Date.now()
+  };
+  ws.send(JSON.stringify(msg));
+  input.value = '';
+}
+
+function addDanmu(msg) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+  const time = msg.server_ts ? new Date(msg.server_ts).toLocaleTimeString() : '';
+  div.innerHTML = `<span class="time">${time}</span><span class="uid">${escHtml(msg.uid || '?')}</span><span class="content">${escHtml(msg.content || '')}</span>`;
+  const container = document.getElementById('messages');
+  container.appendChild(div);
+  // 保持滚动到底部
+  container.scrollTop = container.scrollHeight;
+  // 限制显示条数
+  while (container.children.length > 500) container.removeChild(container.firstChild);
+}
+
+function addSystemMsg(text) {
+  const div = document.createElement('div');
+  div.className = 'msg system';
+  div.textContent = `[系统] ${text}`;
+  const container = document.getElementById('messages');
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function startPolling() {
+  stopPolling();
+  pollRoomInfo();
+  pollTimer = setInterval(pollRoomInfo, 3000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function pollRoomInfo() {
+  const room = document.getElementById('roomInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  fetch(`/api/v1/rooms/${encodeURIComponent(room)}?page=1&limit=1`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  .then(r => r.json())
+  .then(data => {
+    document.getElementById('onlineCount').textContent = data.online_count || 0;
+  })
+  .catch(() => {});
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

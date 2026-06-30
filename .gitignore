@@ -1,0 +1,7 @@
+*.exe
+*.db
+*.sqlite
+bin/
+.env
+danmu_history.db
+*.log
