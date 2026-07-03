@@ -41,13 +41,11 @@ func NewRedisHub(addr, password string, db int, hub *Hub, ctx context.Context) (
 	return rh, nil
 }
 
-// Publish 将消息发布到 Redis Pub/Sub
-func (rh *RedisHub) Publish(msg *Message) error {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	channel := fmt.Sprintf("room:%s", msg.RoomID)
+// PublishBatch 将同一房间的一批消息序列化后单次发布到 Redis Pub/Sub
+// data 与广播给客户端的 payload 复用同一份（[]byte，[]Message 的 JSON 数组），
+// 避免逐条 Marshal + PUBLISH 造成的序列化开销和 Redis RTT 放大
+func (rh *RedisHub) PublishBatch(roomID string, data []byte) error {
+	channel := fmt.Sprintf("room:%s", roomID)
 	return rh.client.Publish(rh.ctx, channel, data).Err()
 }
 
@@ -66,23 +64,7 @@ func (rh *RedisHub) SubscribeRoom(roomID string) {
 			if !ok {
 				return
 			}
-			var msg Message
-			if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
-				log.Printf("[RedisHub] unmarshal error: %v", err)
-				continue
-			}
-
-			// 跳过本机发出的消息，避免重复广播
-			if msg.SourceServer == rh.serverID {
-				continue
-			}
-
-			// 广播到本机该房间的连接
-			data, err := json.Marshal([]*Message{&msg})
-			if err != nil {
-				continue
-			}
-			rh.hub.BroadcastToRoom(msg.RoomID, data)
+			rh.handleIncoming(redisMsg.Payload)
 		}
 	}
 }
@@ -101,24 +83,25 @@ func (rh *RedisHub) SubscribePattern() {
 			if !ok {
 				return
 			}
-			var msg Message
-			if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
-				log.Printf("[RedisHub] unmarshal error: %v", err)
-				continue
-			}
-
-			// 跳过本机发出的消息
-			if msg.SourceServer == rh.serverID {
-				continue
-			}
-
-			data, err := json.Marshal([]*Message{&msg})
-			if err != nil {
-				continue
-			}
-			rh.hub.BroadcastToRoom(msg.RoomID, data)
+			rh.handleIncoming(redisMsg.Payload)
 		}
 	}
+}
+
+// handleIncoming 处理一条 Redis Pub/Sub 载荷（一个房间一批消息的 JSON 数组）
+// 一批消息都由同一个 worker.flush() 在本机生成，SourceServer 恒相同，
+// 只需看首条即可判断是否为本机发出（避免回环重复广播）
+func (rh *RedisHub) handleIncoming(payload string) {
+	var msgs []*Message
+	if err := json.Unmarshal([]byte(payload), &msgs); err != nil {
+		log.Printf("[RedisHub] unmarshal error: %v", err)
+		return
+	}
+	if len(msgs) == 0 || msgs[0].SourceServer == rh.serverID {
+		return
+	}
+	// payload 已经是目标广播格式（[]Message 的 JSON 数组），直接转发给客户端，无需重新 Marshal
+	rh.hub.BroadcastToRoom(msgs[0].RoomID, []byte(payload))
 }
 
 // Close 关闭 Redis 连接

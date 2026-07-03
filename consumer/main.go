@@ -18,6 +18,7 @@ import (
 // Message 与 server 包的 Message 保持一致
 type Message struct {
 	Type         string `json:"type"`
+	MsgID        string `json:"msg_id,omitempty"`
 	RoomID       string `json:"room_id,omitempty"`
 	UID          string `json:"uid,omitempty"`
 	Content      string `json:"content,omitempty"`
@@ -29,7 +30,10 @@ type Message struct {
 func main() {
 	kafkaBrokers := flag.String("kafka", "localhost:9092", "Kafka brokers (comma separated)")
 	kafkaTopic := flag.String("topic", "danmu-history", "Kafka topic")
-	dbPath := flag.String("db", "danmu_history.db", "SQLite database path")
+	chAddr := flag.String("clickhouse-addr", "localhost:9000", "ClickHouse native TCP address")
+	chDatabase := flag.String("clickhouse-db", "default", "ClickHouse database")
+	chUsername := flag.String("clickhouse-user", "default", "ClickHouse username")
+	chPassword := flag.String("clickhouse-password", "", "ClickHouse password")
 	mode := flag.String("mode", "storage", "Consumer mode: storage|broadcast")
 	flag.Parse()
 
@@ -48,7 +52,7 @@ func main() {
 
 	switch *mode {
 	case "storage":
-		runStorageConsumer(ctx, brokers, *kafkaTopic, *dbPath)
+		runStorageConsumer(ctx, brokers, *kafkaTopic, *chAddr, *chDatabase, *chUsername, *chPassword)
 	case "broadcast":
 		runBroadcastConsumer(ctx, brokers, *kafkaTopic)
 	default:
@@ -56,12 +60,12 @@ func main() {
 	}
 }
 
-// runStorageConsumer 落库消费组：将弹幕写入 SQLite
+// runStorageConsumer 落库消费组：将弹幕写入 ClickHouse
 // 消费组 ID: danmu-storage，支持水平扩容和自动 rebalance
-func runStorageConsumer(ctx context.Context, brokers []string, topic, dbPath string) {
-	log.Printf("[storage-consumer] starting, topic=%s, db=%s", topic, dbPath)
+func runStorageConsumer(ctx context.Context, brokers []string, topic, chAddr, chDatabase, chUsername, chPassword string) {
+	log.Printf("[storage-consumer] starting, topic=%s, clickhouse=%s db=%s", topic, chAddr, chDatabase)
 
-	db, err := NewDB(dbPath)
+	db, err := NewDB(chAddr, chDatabase, chUsername, chPassword)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}

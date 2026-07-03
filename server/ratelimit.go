@@ -7,52 +7,66 @@ import (
 
 // TokenBucket 无锁令牌桶限流器，使用 atomic + CAS 实现
 // 每个连接（按 IP/房间）持有一个实例
+//
+// tokens 和 lastRefill 打包进同一个 uint64（state）做单次 CAS：
+// 高32位 = 当前令牌数*1000（定点数，int32 范围足够容纳 capacity*1000），
+// 低32位 = 相对 createdAt 的毫秒偏移（uint32，wraparound 安全——Allow()
+// 调用间隔远小于 2^31ms≈24.8天，且 TokenBucket 生命周期等于单个连接，不会长期存活）。
+// 拆成两个独立 atomic 分别 CAS 会导致并发 goroutine 各自成功但用了不一致的
+// (tokens, lastRefill) 组合，造成补充计算偏移；打包成单个 CAS 后更新是原子的。
 type TokenBucket struct {
-	tokens     atomic.Int64 // 当前令牌数 * 1000（用定点数避免浮点）
-	lastRefill atomic.Int64 // 上次补充时间（UnixNano）
-	rate       int64        // 每秒补充令牌数
-	capacity   int64        // 桶容量
+	state     atomic.Uint64
+	createdAt time.Time
+	rate      int64 // 每秒补充令牌数
+	capacity  int64 // 桶容量
 }
 
 func NewTokenBucket(rate, capacity int64) *TokenBucket {
 	tb := &TokenBucket{
-		rate:     rate,
-		capacity: capacity,
+		createdAt: time.Now(),
+		rate:      rate,
+		capacity:  capacity,
 	}
-	tb.tokens.Store(capacity * 1000)
-	tb.lastRefill.Store(time.Now().UnixNano())
+	tb.state.Store(packState(capacity*1000, 0))
 	return tb
 }
 
-// Allow 尝试消费一个令牌，返回是否允许。无锁 CAS 实现。
+func packState(tokensFixed int64, elapsedMS uint32) uint64 {
+	return uint64(uint32(tokensFixed))<<32 | uint64(elapsedMS)
+}
+
+func unpackState(s uint64) (tokensFixed int64, elapsedMS uint32) {
+	tokensFixed = int64(int32(s >> 32))
+	elapsedMS = uint32(s)
+	return
+}
+
+// Allow 尝试消费一个令牌，返回是否允许。无锁单次 CAS 实现。
 func (tb *TokenBucket) Allow() bool {
+	maxTokens := tb.capacity * 1000
+
 	for {
-		now := time.Now().UnixNano()
-		last := tb.lastRefill.Load()
-		elapsed := now - last
-		if elapsed < 0 {
-			elapsed = 0
-		}
+		old := tb.state.Load()
+		oldTokens, oldElapsedMS := unpackState(old)
 
-		// 计算应补充的令牌数（定点数 *1000）
-		refill := (elapsed * tb.rate * 1000) / int64(time.Second)
+		nowElapsedMS := uint32(time.Since(tb.createdAt).Milliseconds())
+		deltaMS := nowElapsedMS - oldElapsedMS // uint32 减法天然处理 wraparound
 
-		oldTokens := tb.tokens.Load()
+		// 应补充的令牌数（定点数 *1000）：rate(个/秒) * deltaMS(毫秒) = rate * deltaMS / 1000 * 1000
+		refill := int64(deltaMS) * tb.rate
+
 		newTokens := oldTokens + refill
-		maxTokens := tb.capacity * 1000
 		if newTokens > maxTokens {
 			newTokens = maxTokens
 		}
 
-		// 消费一个令牌
 		if newTokens < 1000 {
 			return false
 		}
 		newTokens -= 1000
 
-		// CAS 更新
-		if tb.tokens.CompareAndSwap(oldTokens, newTokens) {
-			tb.lastRefill.Store(now)
+		newState := packState(newTokens, nowElapsedMS)
+		if tb.state.CompareAndSwap(old, newState) {
 			return true
 		}
 		// CAS 失败，重试

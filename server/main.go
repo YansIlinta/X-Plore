@@ -42,6 +42,7 @@ func main() {
 
 	// Hub
 	hub := NewHub(*serverID, *mqMode, ctx, cancel)
+	hub.tokenIssuer = NewTokenIssuer(authToken)
 	go hub.Run()
 
 	// Redis Pub/Sub

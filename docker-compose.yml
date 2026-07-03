@@ -11,6 +11,27 @@ services:
     networks:
       - danmu
 
+  # ClickHouse - 弹幕历史落库（替代 SQLite，见 3.1.3：写多读少的时序数据场景更适合列式存储）
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    restart: unless-stopped
+    networks:
+      - danmu
+
   # Kafka (KRaft 模式，无需 Zookeeper)
   kafka:
     image: bitnami/kafka:3.7
@@ -94,12 +115,14 @@ services:
       ./consumer
       -kafka=kafka:9092
       -topic=danmu-history
-      -db=/data/danmu_history.db
+      -clickhouse-addr=clickhouse:9000
+      -clickhouse-db=default
+      -clickhouse-user=default
+      -clickhouse-password=
       -mode=storage
-    volumes:
-      - consumer_data:/data
     depends_on:
       - kafka
+      - clickhouse
     restart: unless-stopped
     networks:
       - danmu
@@ -120,7 +143,7 @@ services:
 
 volumes:
   kafka_data:
-  consumer_data:
+  clickhouse_data:
 
 networks:
   danmu:

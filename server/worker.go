@@ -35,6 +35,21 @@ func (wp *WorkerPool) Start() {
 		wp.wg.Add(1)
 		go wp.worker(i)
 	}
+	go wp.reportQueueLength()
+}
+
+// reportQueueLength 定期采样 msgQueue 长度，供 Prometheus danmu_msgqueue_length 使用
+func (wp *WorkerPool) reportQueueLength() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-wp.hub.ctx.Done():
+			return
+		case <-ticker.C:
+			metricMsgQueueLength.Set(float64(len(wp.hub.msgQueue)))
+		}
+	}
 }
 
 // Wait 等待所有 worker 退出
@@ -74,9 +89,13 @@ func (wp *WorkerPool) worker(id int) {
 			// 本机广播
 			wp.hub.BroadcastToRoom(roomID, data)
 
-			// 跨机广播：Redis Pub/Sub 和/或 Kafka
+			// 跨机广播：Redis Pub/Sub（整房间一批消息单次 PUBLISH）和/或 Kafka（逐条，保留 Kafka 分区/持久化语义）
+			wp.publishRoomBatch(roomID, data, msgs)
+
+			metricMessagesTotal.WithLabelValues(roomID, "out").Add(float64(len(msgs)))
+			now := time.Now()
 			for _, msg := range msgs {
-				wp.publishMessage(msg)
+				metricBroadcastLatency.Observe(now.Sub(time.UnixMilli(msg.ServerTS)).Seconds())
 			}
 		}
 
@@ -124,26 +143,30 @@ func (wp *WorkerPool) worker(id int) {
 	}
 }
 
-// publishMessage 将消息发布到 Redis 和/或 Kafka
-func (wp *WorkerPool) publishMessage(msg *Message) {
+// publishRoomBatch 将一个房间的一批消息发布到 Redis（整批单次 PUBLISH）和/或 Kafka（逐条）
+func (wp *WorkerPool) publishRoomBatch(roomID string, data []byte, msgs []*Message) {
 	h := wp.hub
 
 	switch h.mqMode {
 	case "redis":
-		wp.publishRedis(msg)
+		wp.publishRedisBatch(roomID, data)
 	case "kafka":
-		wp.publishKafka(msg)
+		for _, msg := range msgs {
+			wp.publishKafka(msg)
+		}
 	case "both":
-		wp.publishRedis(msg)
-		wp.publishKafka(msg)
+		wp.publishRedisBatch(roomID, data)
+		for _, msg := range msgs {
+			wp.publishKafka(msg)
+		}
 	}
 }
 
-func (wp *WorkerPool) publishRedis(msg *Message) {
+func (wp *WorkerPool) publishRedisBatch(roomID string, data []byte) {
 	if wp.hub.redisHub == nil {
 		return
 	}
-	if err := wp.hub.redisHub.Publish(msg); err != nil {
+	if err := wp.hub.redisHub.PublishBatch(roomID, data); err != nil {
 		log.Printf("[worker] redis publish error: %v", err)
 	}
 }

@@ -2,6 +2,18 @@
 
 高并发直播弹幕系统，支持多机部署、百万级 WebSocket 长连接、Redis 跨机实时广播、Kafka 持久化与多消费组。
 
+## 近期改进
+
+在原有实现基础上做了一轮正确性修复与可扩展性/工程化增强：
+
+- **正确性**：修复 `Client.Close()` 并发写 conn / 并发 close(sendCh) 的竞态；`TokenBucket` 改为单次 CAS 打包更新，消除拆分写的 ABA 问题
+- **存储**：弹幕历史落库从 SQLite 换成 ClickHouse（MergeTree，按天分区，(room_id, server_ts) 排序键），解决单写者瓶颈和分布式部署限制
+- **可扩展性**：Hub 从全局 `RWMutex` 改为 256 分片锁；Redis Pub/Sub 从逐条 publish 改为按房间批量发布；Nginx 从 `ip_hash` 改为基于 `X-Forwarded-For` 的一致性哈希，修复 CDN/代理后路由失效问题
+- **可靠性**：消息带全局唯一 `msg_id`，前端滑动窗口去重，避免 Redis/Kafka 双路径重复投递
+- **可观测性**：接入 Prometheus（`danmu_connections_total`、`danmu_messages_total`、`danmu_broadcast_latency_seconds`、`danmu_msgqueue_length`），`/metrics` 端点
+- **安全**：本地 AC 自动机敏感词过滤；WebSocket 长连接引入限时会话令牌 + 在线续期（`reauth` 消息 + `/api/v1/session-token`），到期未续期自动断开
+- **前端**：消息列表改为虚拟滚动，DOM 节点数不再随弹幕总量增长
+
 ## 架构图
 
 ```mermaid
@@ -12,7 +24,7 @@ graph TB
     end
 
     subgraph LB[负载均衡]
-        Nginx[Nginx ip_hash]
+        Nginx[Nginx 一致性哈希<br/>优先X-Forwarded-For]
     end
 
     subgraph Server1[弹幕服务器 srv1]
@@ -40,7 +52,7 @@ graph TB
     end
 
     subgraph Storage
-        SQLite[(SQLite/Postgres)]
+        CH[(ClickHouse<br/>MergeTree)]
     end
 
     Browser -->|WebSocket| Nginx
@@ -58,7 +70,7 @@ graph TB
 
     WP1 -->|Produce| Kafka
     WP2 -->|Produce| Kafka
-    Kafka --> CG1 --> SQLite
+    Kafka --> CG1 --> CH
     Kafka --> CG2
 ```
 
@@ -69,24 +81,24 @@ graph TB
                                                     │
                                             ┌───────┼───────┐
                                        本机广播   Kafka    Redis Pub/Sub
-                                       (同机连接)  (持久化)  (跨机实时广播)
+                                       (同机连接)  (持久化)  (跨机实时广播，按房间批量publish)
                                                     │
                                             ┌───────┼───────┐
                                        落库消费组  广播消费组  分析消费组
-                                       (SQLite)   (备选广播)  (可扩展)
+                                       (ClickHouse) (备选广播)  (可扩展)
 ```
 
 ## 各组件职责
 
 | 组件 | 职责 |
 |------|------|
-| **Nginx** | WebSocket 负载均衡（ip_hash），HTTP 反向代理 |
-| **弹幕服务器** | WebSocket 长连接管理、消息队列削峰、worker 池批量广播、限流 |
-| **Hub** | 房间-连接映射管理（`map[roomId]map[uid]*Client`，RWMutex 保护） |
+| **Nginx** | WebSocket 负载均衡（`hash $client_identifier consistent`，优先 X-Forwarded-For），HTTP 反向代理 |
+| **弹幕服务器** | WebSocket 长连接管理、消息队列削峰、worker 池批量广播、限流、敏感词过滤、会话续期 |
+| **Hub** | 房间-连接映射管理，256 分片锁（每分片独立 `RWMutex`），避免全局锁竞争 |
 | **Worker Pool** | 固定 `CPU*4` goroutine，批量聚合（1000条/10ms）后广播，减少 syscall |
-| **Redis Pub/Sub** | 跨机实时广播，频道 `room:{roomId}`，SourceServer 去重 |
+| **Redis Pub/Sub** | 跨机实时广播，频道 `room:{roomId}`，按房间批量 publish，SourceServer 去重 |
 | **Kafka Producer** | 异步批量写入 `danmu-history` topic，按 roomId 分区 |
-| **落库消费组** | 消费 Kafka 写入 SQLite，支持水平扩容、自动 rebalance |
+| **落库消费组** | 消费 Kafka 写入 ClickHouse（MergeTree），支持水平扩容、自动 rebalance |
 | **广播消费组** | Kafka 驱动的备选跨机广播方案 |
 | **压测程序** | 参数化压测，HDR Histogram 高精度延迟统计 |
 
@@ -128,7 +140,7 @@ docker-compose logs -f danmu-server-1
 ### 2. 手动启动（开发环境）
 
 ```bash
-# 先启动 Redis 和 Kafka
+# 先启动 Redis、Kafka、ClickHouse
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 docker run -d --name kafka -p 9092:9092 \
   -e KAFKA_CFG_NODE_ID=1 \
@@ -139,6 +151,7 @@ docker run -d --name kafka -p 9092:9092 \
   -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT \
   -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
   bitnami/kafka:3.7
+docker run -d --name clickhouse -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:24.3-alpine
 
 # 编译服务器
 cd server && go build -o ../bin/server . && cd ..
@@ -158,7 +171,8 @@ DANMU_AUTH_TOKEN=danmu-secret-token ./bin/server \
   -addr=:8082 -id=srv2 -redis=localhost:6379 -kafka=localhost:9092 -mq=both
 
 # 启动落库消费者
-./bin/consumer -kafka=localhost:9092 -topic=danmu-history -db=danmu.db -mode=storage
+./bin/consumer -kafka=localhost:9092 -topic=danmu-history \
+  -clickhouse-addr=localhost:9000 -clickhouse-db=default -clickhouse-user=default -mode=storage
 ```
 
 ### 3. 访问前端
@@ -350,18 +364,21 @@ remote_port = 8080
 danmu/
 ├── server/              # 弹幕服务器
 │   ├── main.go          # 入口、信号处理、优雅退出
-│   ├── hub.go           # 连接与房间管理（RWMutex）
-│   ├── client.go        # WebSocket 客户端（readPump/writePump）
+│   ├── hub.go           # 连接与房间管理（256 分片锁）
+│   ├── client.go        # WebSocket 客户端（readPump/writePump/会话续期）
 │   ├── worker.go        # Worker 池（批量聚合广播）
 │   ├── message.go       # 消息结构与 sync.Pool
-│   ├── redis.go         # Redis Pub/Sub 跨机广播
+│   ├── redis.go         # Redis Pub/Sub 跨机广播（按房间批量发布）
 │   ├── kafka.go         # Kafka 生产者
 │   ├── api.go           # REST API 处理器
 │   ├── middleware.go     # 鉴权、RequestID、日志
-│   └── ratelimit.go     # 无锁令牌桶限流
+│   ├── ratelimit.go     # 无锁令牌桶限流（单次 CAS 打包更新）
+│   ├── filter.go        # AC 自动机敏感词过滤
+│   ├── authtoken.go     # 会话令牌签发/校验（WebSocket 鉴权续期）
+│   └── metrics.go       # Prometheus 指标定义
 ├── consumer/            # Kafka 消费者
 │   ├── main.go          # 落库/广播两种消费模式
-│   └── db.go            # SQLite 存储
+│   └── db.go            # ClickHouse 存储
 ├── loadtest/            # 压测程序
 │   └── main.go          # 全指标采集、HDR Histogram
 ├── web/
@@ -402,4 +419,13 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 # 历史弹幕
 curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:8081/api/v1/history?room=room-1&page=1&limit=20"
+
+# 刷新 WebSocket 长连接的会话令牌（鉴权续期，见"近期改进"）
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"uid":"user-1","room_id":"room-1"}' \
+  http://localhost:8081/api/v1/session-token
+
+# Prometheus 指标（无需鉴权）
+curl http://localhost:8081/metrics
 ```

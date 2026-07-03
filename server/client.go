@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,11 +31,17 @@ type Client struct {
 	limiter *TokenBucket
 	ctx     context.Context
 	cancel  context.CancelFunc
+
+	closeOnce   sync.Once
+	closeCode   int // Close()设置，writePump在ctx.Done()后据此发送CloseMessage
+	closeReason string
+
+	sessionExpiresAt atomic.Int64 // UnixNano，会话令牌到期时间；由writePump定期检查，过期未续期则断开
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx context.Context) *Client {
 	ctx, cancel := context.WithCancel(parentCtx)
-	return &Client{
+	c := &Client{
 		hub:     hub,
 		conn:    conn,
 		sendCh:  make(chan []byte, sendChSize),
@@ -43,6 +51,8 @@ func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx con
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	c.sessionExpiresAt.Store(time.Now().Add(sessionTTL).UnixNano())
+	return c
 }
 
 // readPump 只读 goroutine，从 WebSocket 读取上行消息
@@ -76,6 +86,17 @@ func (c *Client) readPump() {
 			return
 		}
 
+		var up UpMessage
+		if err := json.Unmarshal(data, &up); err != nil {
+			continue
+		}
+
+		if up.Type == "reauth" {
+			// 会话续期消息不占用弹幕限流配额，也不经过 msgQueue
+			c.handleReauth(up.Token)
+			continue
+		}
+
 		// 限流检查
 		if !c.limiter.Allow() {
 			// 超额消息丢弃，不断开连接
@@ -84,11 +105,6 @@ func (c *Client) readPump() {
 			case c.sendCh <- rateLimitMsg:
 			default:
 			}
-			continue
-		}
-
-		var up UpMessage
-		if err := json.Unmarshal(data, &up); err != nil {
 			continue
 		}
 
@@ -101,9 +117,12 @@ func (c *Client) readPump() {
 		if len(content) > 500 {
 			content = content[:500]
 		}
+		// 本地 AC 自动机敏感词过滤，纯内存匹配不阻塞主链路
+		content = c.hub.filter.Filter(content)
 
 		msg := acquireMessage()
 		msg.Type = "danmu"
+		msg.MsgID = c.hub.nextMsgID()
 		msg.RoomID = c.roomID
 		msg.UID = c.uid
 		msg.Content = content
@@ -114,11 +133,31 @@ func (c *Client) readPump() {
 		// 投递到进程内消息队列（带缓冲 channel 做削峰）
 		select {
 		case c.hub.msgQueue <- msg:
+			metricMessagesTotal.WithLabelValues(c.roomID, "in").Inc()
 		default:
 			// 队列满，丢弃消息
 			releaseMessage(msg)
 			log.Printf("[readPump] msgQueue full, dropping message from uid=%s room=%s", c.uid, c.roomID)
 		}
+	}
+}
+
+// handleReauth 校验客户端上报的续期令牌，通过则延长会话到期时间并回 ack，
+// 不通过只记录日志，不主动断开——真正的强制点是 writePump 里的到期检查
+func (c *Client) handleReauth(token string) {
+	if c.hub.tokenIssuer == nil {
+		return
+	}
+	expiresAt, err := c.hub.tokenIssuer.Verify(token, c.uid, c.roomID)
+	if err != nil {
+		log.Printf("[reauth] uid=%s room=%s reject: %v", c.uid, c.roomID, err)
+		return
+	}
+	c.sessionExpiresAt.Store(expiresAt.UnixNano())
+	ack := []byte(`[{"type":"reauth_ack"}]`)
+	select {
+	case c.sendCh <- ack:
+	default:
 	}
 }
 
@@ -134,24 +173,32 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case <-c.ctx.Done():
+			// c.closeCode/closeReason 由 Close() 在 cancel() 之前写入；
+			// context 取消的 happens-before 语义保证这里能读到最新值
+			code := c.closeCode
+			reason := c.closeReason
+			if code == 0 {
+				code = 1001
+				reason = "server shutting down"
+			}
 			c.conn.WriteControl(websocket.CloseMessage,
-				websocket.FormatCloseMessage(1001, "server shutting down"),
+				websocket.FormatCloseMessage(code, reason),
 				time.Now().Add(writeWait))
 			return
 
-		case message, ok := <-c.sendCh:
+		case message := <-c.sendCh:
+			// sendCh 从不 close（见 Close() 注释），message 恒为有效数据
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				c.conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(1000, ""),
-					time.Now().Add(writeWait))
-				return
-			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 
 		case <-ticker.C:
+			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
+				// 会话令牌到期前未收到有效 reauth，主动断开
+				c.Close(4008, "session expired")
+				continue
+			}
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
@@ -160,11 +207,14 @@ func (c *Client) writePump() {
 	}
 }
 
-// Close 主动关闭连接（踢人/关房间），发送 CloseMessage
+// Close 主动关闭连接（踢人/关房间）
+// 不直接写 conn（写者只能是 writePump，否则与其正常下行消息竞争同一个 conn），
+// 也不 close(sendCh)（BroadcastToRoom 等可能仍在并发向 sendCh 发送，close 后再 send 会 panic）。
+// 只记录关闭码/原因后 cancel ctx，由 writePump 感知 ctx.Done() 后统一发送 CloseMessage 并退出。
 func (c *Client) Close(code int, reason string) {
-	c.conn.WriteControl(websocket.CloseMessage,
-		websocket.FormatCloseMessage(code, reason),
-		time.Now().Add(writeWait))
-	c.cancel()
-	close(c.sendCh)
+	c.closeOnce.Do(func() {
+		c.closeCode = code
+		c.closeReason = reason
+		c.cancel()
+	})
 }

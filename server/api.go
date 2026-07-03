@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // API 处理所有 REST 接口和 WebSocket 升级
@@ -53,6 +54,7 @@ func (a *API) SetupRoutes(mux *http.ServeMux) {
 	// 无需鉴权
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/ws", a.handleWebSocket)
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// 需要鉴权的 API（通过 authMiddleware 包装）
 	apiMux := http.NewServeMux()
@@ -61,6 +63,7 @@ func (a *API) SetupRoutes(mux *http.ServeMux) {
 	apiMux.HandleFunc("/api/v1/broadcast", a.handleBroadcast)
 	apiMux.HandleFunc("/api/v1/clients", a.handleClients)
 	apiMux.HandleFunc("/api/v1/history", a.handleHistory)
+	apiMux.HandleFunc("/api/v1/session-token", a.handleSessionToken)
 
 	// 带路径参数的路由需要手动匹配
 	apiMux.HandleFunc("/api/v1/rooms/", a.handleRoomByID)
@@ -127,6 +130,21 @@ func (a *API) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	go client.writePump()
 	go client.readPump()
+
+	// 握手成功后立即下发一个绑定uid+room、限时的会话令牌，客户端需在到期前
+	// 通过 /api/v1/session-token 刷新并以 {"type":"reauth"} 消息续期
+	if a.hub.tokenIssuer != nil {
+		sessionToken, expiresAt := a.hub.tokenIssuer.Issue(uid, roomID, sessionTTL)
+		payload, _ := json.Marshal([]map[string]interface{}{{
+			"type":       "session_token",
+			"token":      sessionToken,
+			"expires_at": expiresAt.UnixMilli(),
+		}})
+		select {
+		case client.sendCh <- payload:
+		default:
+		}
+	}
 }
 
 // GET /api/v1/stats - 服务器统计
@@ -375,6 +393,35 @@ func (a *API) handleHistory(w http.ResponseWriter, r *http.Request) {
 		"page":  page,
 		"limit": limit,
 		"items": items,
+	})
+}
+
+// POST /api/v1/session-token - 刷新 WebSocket 长连接的会话令牌（鉴权续期）
+// 客户端持有的静态 Bearer token 用于调用本接口，换取一个短时效、绑定 uid+room
+// 的新令牌，再通过已建立的 WebSocket 连接发送 {"type":"reauth","token":"..."}续期
+func (a *API) handleSessionToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only POST allowed")
+		return
+	}
+	if a.hub.tokenIssuer == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "UNAVAILABLE", "session token issuance not configured")
+		return
+	}
+
+	var req struct {
+		UID    string `json:"uid"`
+		RoomID string `json:"room_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UID == "" || req.RoomID == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "uid and room_id are required")
+		return
+	}
+
+	token, expiresAt := a.hub.tokenIssuer.Issue(req.UID, req.RoomID, sessionTTL)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token":      token,
+		"expires_at": expiresAt.UnixMilli(),
 	})
 }
 
