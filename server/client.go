@@ -24,33 +24,35 @@ const (
 // writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh 串行写出
 // 禁止其他 goroutine 直接调用 conn.WriteMessage
 type Client struct {
-	hub     *Hub
-	conn    *websocket.Conn
-	sendCh  chan []byte // 外发消息 channel，writePump 是唯一消费者
-	uid     string
-	roomID  string
-	limiter *TokenBucket
-	ctx     context.Context
-	cancel  context.CancelFunc
+	hub        *Hub
+	conn       *websocket.Conn
+	sendCh     chan []byte                    // 外发原始消息 (控制消息如 rate_limited, reauth_ack)
+	preparedCh chan *websocket.PreparedMessage // 外发预编码帧 (广播消息，免去逐连接帧构建)
+	uid        string
+	roomID     string
+	limiter    *TokenBucket
+	ctx        context.Context
+	cancel     context.CancelFunc
 
 	closeOnce   sync.Once
-	closeCode   int // Close()设置，writePump在ctx.Done()后据此发送CloseMessage
+	closeCode   int
 	closeReason string
 
-	sessionExpiresAt atomic.Int64 // UnixNano，会话令牌到期时间；由writePump定期检查，过期未续期则断开
+	sessionExpiresAt atomic.Int64
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx context.Context) *Client {
 	ctx, cancel := context.WithCancel(parentCtx)
 	c := &Client{
-		hub:     hub,
-		conn:    conn,
-		sendCh:  make(chan []byte, sendChSize),
-		uid:     uid,
-		roomID:  roomID,
-		limiter: NewTokenBucket(20, 50), // 每秒 20 条，突发 50
-		ctx:     ctx,
-		cancel:  cancel,
+		hub:        hub,
+		conn:       conn,
+		sendCh:     make(chan []byte, 64),
+		preparedCh: make(chan *websocket.PreparedMessage, sendChSize),
+		uid:        uid,
+		roomID:     roomID,
+		limiter:    NewTokenBucket(20, 50),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 	c.sessionExpiresAt.Store(time.Now().Add(sessionTTL).UnixNano())
 	return c
@@ -163,16 +165,11 @@ func (c *Client) handleReauth(token string) {
 }
 
 // writePump 唯一写者 goroutine，从 sendCh 消费消息写往 WebSocket
-// 使用定时器驱动的微批次策略：每 flushInterval 刷新一次，让更多消息在 sendCh 积累后合并写出
 // 并发约束：只有 writePump 调用 conn.WriteMessage，其他 goroutine 禁止直接写
-const flushInterval = 5 * time.Millisecond
-
 func (c *Client) writePump() {
-	pingTicker := time.NewTicker(pingPeriod)
-	flushTicker := time.NewTicker(flushInterval)
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
-		pingTicker.Stop()
-		flushTicker.Stop()
+		ticker.Stop()
 		c.conn.Close()
 	}()
 
@@ -190,31 +187,29 @@ func (c *Client) writePump() {
 				time.Now().Add(writeWait))
 			return
 
-		case <-flushTicker.C:
-			// 定时排空 sendCh，合并所有待发消息为一次 WebSocket 写入
-			pending := len(c.sendCh)
-			if pending == 0 {
-				continue
+		case message := <-c.sendCh:
+			// 控制消息（rate_limited, reauth_ack 等），直接写
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
 			}
-			if pending == 1 {
-				msg := <-c.sendCh
-				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-					return
-				}
-			} else {
-				batched := make([][]byte, 0, pending)
-				for i := 0; i < pending; i++ {
-					batched = append(batched, <-c.sendCh)
-				}
-				merged := mergeJSONArrays(batched)
-				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := c.conn.WriteMessage(websocket.TextMessage, merged); err != nil {
+
+		case pm := <-c.preparedCh:
+			// 广播消息：使用预编码帧，省去帧头构建开销
+			// 批量排空：连续写出所有待发预编码帧
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WritePreparedMessage(pm); err != nil {
+				return
+			}
+			// 排空剩余
+			for drain := len(c.preparedCh); drain > 0; drain-- {
+				pm = <-c.preparedCh
+				if err := c.conn.WritePreparedMessage(pm); err != nil {
 					return
 				}
 			}
 
-		case <-pingTicker.C:
+		case <-ticker.C:
 			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
 				c.Close(4008, "session expired")
 				continue
