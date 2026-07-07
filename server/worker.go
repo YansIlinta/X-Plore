@@ -99,11 +99,15 @@ func (wp *WorkerPool) worker(id int) {
 			}
 		}
 
-		// Kafka 持久化路径：整批一次调用，不在广播热路径上逐条发送
+		// Kafka 持久化路径：异步发送，完全不阻塞广播热路径
 		if wp.hub.kafkaProd != nil && (wp.hub.mqMode == "kafka" || wp.hub.mqMode == "both") {
-			if err := wp.hub.kafkaProd.SendBatch(batch); err != nil {
-				log.Printf("[worker %d] kafka batch send error: %v", id, err)
-			}
+			kafkaCopy := make([]*Message, len(batch))
+			copy(kafkaCopy, batch)
+			go func() {
+				if err := wp.hub.kafkaProd.SendBatch(kafkaCopy); err != nil {
+					log.Printf("[worker %d] kafka batch send error: %v", id, err)
+				}
+			}()
 		}
 
 		// 回收消息对象
