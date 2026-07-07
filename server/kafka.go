@@ -56,9 +56,8 @@ func (kp *KafkaProducer) Send(msg *Message) error {
 	})
 }
 
-// SendBatch 批量发送消息到 Kafka，单次 WriteMessages 调用，
-// 减少逐条 marshal + 网络往返的开销
-func (kp *KafkaProducer) SendBatch(msgs []*Message) error {
+// PrepareBatch 在消息被回收前完成序列化，返回可安全异步发送的 Kafka 消息
+func (kp *KafkaProducer) PrepareBatch(msgs []*Message) []kafka.Message {
 	kafkaMsgs := make([]kafka.Message, 0, len(msgs))
 	for _, msg := range msgs {
 		data, err := json.Marshal(msg)
@@ -70,6 +69,11 @@ func (kp *KafkaProducer) SendBatch(msgs []*Message) error {
 			Value: data,
 		})
 	}
+	return kafkaMsgs
+}
+
+// SendPrepared 异步发送已序列化的 Kafka 消息
+func (kp *KafkaProducer) SendPrepared(kafkaMsgs []kafka.Message) error {
 	if len(kafkaMsgs) == 0 {
 		return nil
 	}
