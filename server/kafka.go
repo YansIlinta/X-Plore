@@ -56,6 +56,26 @@ func (kp *KafkaProducer) Send(msg *Message) error {
 	})
 }
 
+// SendBatch 批量发送消息到 Kafka，单次 WriteMessages 调用，
+// 减少逐条 marshal + 网络往返的开销
+func (kp *KafkaProducer) SendBatch(msgs []*Message) error {
+	kafkaMsgs := make([]kafka.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		kafkaMsgs = append(kafkaMsgs, kafka.Message{
+			Key:   []byte(msg.RoomID),
+			Value: data,
+		})
+	}
+	if len(kafkaMsgs) == 0 {
+		return nil
+	}
+	return kp.writer.WriteMessages(kp.ctx, kafkaMsgs...)
+}
+
 // Close 关闭 Kafka 生产者
 func (kp *KafkaProducer) Close() error {
 	return kp.writer.Close()

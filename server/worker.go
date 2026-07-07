@@ -78,7 +78,7 @@ func (wp *WorkerPool) worker(id int) {
 			roomMsgs[msg.RoomID] = append(roomMsgs[msg.RoomID], msg)
 		}
 
-		// 按房间批量广播
+		// 按房间批量广播（优先完成本机 + Redis 实时路径）
 		for roomID, msgs := range roomMsgs {
 			data, err := json.Marshal(msgs)
 			if err != nil {
@@ -89,13 +89,20 @@ func (wp *WorkerPool) worker(id int) {
 			// 本机广播
 			wp.hub.BroadcastToRoom(roomID, data)
 
-			// 跨机广播：Redis Pub/Sub（整房间一批消息单次 PUBLISH）和/或 Kafka（逐条，保留 Kafka 分区/持久化语义）
-			wp.publishRoomBatch(roomID, data, msgs)
+			// Redis 跨机广播（实时路径）
+			wp.publishRedisBatch(roomID, data)
 
 			metricMessagesTotal.WithLabelValues(roomID, "out").Add(float64(len(msgs)))
 			now := time.Now()
 			for _, msg := range msgs {
 				metricBroadcastLatency.Observe(now.Sub(time.UnixMilli(msg.ServerTS)).Seconds())
+			}
+		}
+
+		// Kafka 持久化路径：整批一次调用，不在广播热路径上逐条发送
+		if wp.hub.kafkaProd != nil && (wp.hub.mqMode == "kafka" || wp.hub.mqMode == "both") {
+			if err := wp.hub.kafkaProd.SendBatch(batch); err != nil {
+				log.Printf("[worker %d] kafka batch send error: %v", id, err)
 			}
 		}
 
@@ -143,25 +150,6 @@ func (wp *WorkerPool) worker(id int) {
 	}
 }
 
-// publishRoomBatch 将一个房间的一批消息发布到 Redis（整批单次 PUBLISH）和/或 Kafka（逐条）
-func (wp *WorkerPool) publishRoomBatch(roomID string, data []byte, msgs []*Message) {
-	h := wp.hub
-
-	switch h.mqMode {
-	case "redis":
-		wp.publishRedisBatch(roomID, data)
-	case "kafka":
-		for _, msg := range msgs {
-			wp.publishKafka(msg)
-		}
-	case "both":
-		wp.publishRedisBatch(roomID, data)
-		for _, msg := range msgs {
-			wp.publishKafka(msg)
-		}
-	}
-}
-
 func (wp *WorkerPool) publishRedisBatch(roomID string, data []byte) {
 	if wp.hub.redisHub == nil {
 		return
@@ -171,12 +159,3 @@ func (wp *WorkerPool) publishRedisBatch(roomID string, data []byte) {
 	}
 }
 
-func (wp *WorkerPool) publishKafka(msg *Message) {
-	if wp.hub.kafkaProd == nil {
-		return
-	}
-	if err := wp.hub.kafkaProd.Send(msg); err != nil {
-		// Kafka 不可用时降级：记录日志，不阻塞实时广播主链路
-		log.Printf("[worker] kafka send error (degraded): %v", err)
-	}
-}
