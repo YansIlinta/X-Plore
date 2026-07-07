@@ -134,6 +134,9 @@ func (h *Hub) removeClient(c *Client) {
 	}
 }
 
+// broadcastParallelThreshold 超过此数量的客户端时启用并行广播
+const broadcastParallelThreshold = 50
+
 // BroadcastToRoom 向指定房间的所有连接发送消息
 // 使用分片 RLock，只阻塞同分片内的房间增删，不影响其他分片的广播/注册
 // 持锁约束：此处持 RLock，只做 channel send（非阻塞），不发 RPC
@@ -152,13 +155,38 @@ func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
 	}
 	shard.mu.RUnlock()
 
-	for _, c := range clients {
-		select {
-		case c.sendCh <- data:
-		default:
-			// sendCh 满（慢客户端），丢弃消息，保护整体不阻塞
+	n := len(clients)
+	if n <= broadcastParallelThreshold {
+		// 小房间：直接顺序发送
+		for _, c := range clients {
+			select {
+			case c.sendCh <- data:
+			default:
+			}
 		}
+		return
 	}
+
+	// 大房间：分段并行发送，减少单 goroutine 顺序推送延迟
+	const segSize = 64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i += segSize {
+		end := i + segSize
+		if end > n {
+			end = n
+		}
+		wg.Add(1)
+		go func(segment []*Client) {
+			defer wg.Done()
+			for _, c := range segment {
+				select {
+				case c.sendCh <- data:
+				default:
+				}
+			}
+		}(clients[i:end])
+	}
+	wg.Wait()
 }
 
 // BroadcastToAll 广播到所有房间
