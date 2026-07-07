@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-
-	"github.com/gorilla/websocket"
 )
 
 const msgQueueSize = 100000
@@ -154,15 +152,9 @@ func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
 	}
 	shard.mu.RUnlock()
 
-	// 预编码 WebSocket 帧：构建一次，所有连接复用，省去 N 次帧头构建
-	pm, err := websocket.NewPreparedMessage(websocket.TextMessage, data)
-	if err != nil {
-		return
-	}
-
 	for _, c := range clients {
 		select {
-		case c.preparedCh <- pm:
+		case c.sendCh <- data:
 		default:
 		}
 	}

@@ -24,15 +24,14 @@ const (
 // writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh 串行写出
 // 禁止其他 goroutine 直接调用 conn.WriteMessage
 type Client struct {
-	hub        *Hub
-	conn       *websocket.Conn
-	sendCh     chan []byte                    // 外发原始消息 (控制消息如 rate_limited, reauth_ack)
-	preparedCh chan *websocket.PreparedMessage // 外发预编码帧 (广播消息，免去逐连接帧构建)
-	uid        string
-	roomID     string
-	limiter    *TokenBucket
-	ctx        context.Context
-	cancel     context.CancelFunc
+	hub     *Hub
+	conn    *websocket.Conn
+	sendCh  chan []byte // 外发消息 channel，writePump 是唯一消费者
+	uid     string
+	roomID  string
+	limiter *TokenBucket
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	closeOnce   sync.Once
 	closeCode   int
@@ -44,15 +43,14 @@ type Client struct {
 func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx context.Context) *Client {
 	ctx, cancel := context.WithCancel(parentCtx)
 	c := &Client{
-		hub:        hub,
-		conn:       conn,
-		sendCh:     make(chan []byte, 64),
-		preparedCh: make(chan *websocket.PreparedMessage, sendChSize),
-		uid:        uid,
-		roomID:     roomID,
-		limiter:    NewTokenBucket(20, 50),
-		ctx:        ctx,
-		cancel:     cancel,
+		hub:     hub,
+		conn:    conn,
+		sendCh:  make(chan []byte, sendChSize),
+		uid:     uid,
+		roomID:  roomID,
+		limiter: NewTokenBucket(20, 50),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 	c.sessionExpiresAt.Store(time.Now().Add(sessionTTL).UnixNano())
 	return c
@@ -188,23 +186,22 @@ func (c *Client) writePump() {
 			return
 
 		case message := <-c.sendCh:
-			// 控制消息（rate_limited, reauth_ack 等），直接写
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				return
-			}
-
-		case pm := <-c.preparedCh:
-			// 广播消息：使用预编码帧，省去帧头构建开销
-			// 批量排空：连续写出所有待发预编码帧
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WritePreparedMessage(pm); err != nil {
-				return
-			}
-			// 排空剩余
-			for drain := len(c.preparedCh); drain > 0; drain-- {
-				pm = <-c.preparedCh
-				if err := c.conn.WritePreparedMessage(pm); err != nil {
+			// 批量排空：将 sendCh 中所有待发消息合并为一次 WebSocket 写入
+			pending := len(c.sendCh)
+			if pending == 0 {
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+					return
+				}
+			} else {
+				batched := make([][]byte, 0, pending+1)
+				batched = append(batched, message)
+				for i := 0; i < pending; i++ {
+					batched = append(batched, <-c.sendCh)
+				}
+				merged := mergeJSONArrays(batched)
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := c.conn.WriteMessage(websocket.TextMessage, merged); err != nil {
 					return
 				}
 			}
