@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	batchSize    = 1000
-	batchTimeout = 10 * time.Millisecond
+	batchSize    = 2000
+	batchTimeout = 20 * time.Millisecond
 )
 
 // WorkerPool 固定大小的 worker 池，消费 msgQueue，批量聚合后广播
@@ -24,7 +24,7 @@ type WorkerPool struct {
 func NewWorkerPool(hub *Hub) *WorkerPool {
 	return &WorkerPool{
 		hub:     hub,
-		workers: runtime.NumCPU() * 4,
+		workers: runtime.NumCPU() * 2,
 	}
 }
 
