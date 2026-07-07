@@ -163,19 +163,22 @@ func (c *Client) handleReauth(token string) {
 }
 
 // writePump 唯一写者 goroutine，从 sendCh 消费消息写往 WebSocket
+// 使用定时器驱动的微批次策略：每 flushInterval 刷新一次，让更多消息在 sendCh 积累后合并写出
 // 并发约束：只有 writePump 调用 conn.WriteMessage，其他 goroutine 禁止直接写
+const flushInterval = 5 * time.Millisecond
+
 func (c *Client) writePump() {
-	ticker := time.NewTicker(pingPeriod)
+	pingTicker := time.NewTicker(pingPeriod)
+	flushTicker := time.NewTicker(flushInterval)
 	defer func() {
-		ticker.Stop()
+		pingTicker.Stop()
+		flushTicker.Stop()
 		c.conn.Close()
 	}()
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			// c.closeCode/closeReason 由 Close() 在 cancel() 之前写入；
-			// context 取消的 happens-before 语义保证这里能读到最新值
 			code := c.closeCode
 			reason := c.closeReason
 			if code == 0 {
@@ -187,20 +190,20 @@ func (c *Client) writePump() {
 				time.Now().Add(writeWait))
 			return
 
-		case message := <-c.sendCh:
-			// 批量排空：将 sendCh 中所有待发消息合并为一次 WebSocket 写入，
-			// 大幅减少 syscall 次数（从每条一次降为每批一次）
+		case <-flushTicker.C:
+			// 定时排空 sendCh，合并所有待发消息为一次 WebSocket 写入
 			pending := len(c.sendCh)
 			if pending == 0 {
-				// 只有一条，直接写
+				continue
+			}
+			if pending == 1 {
+				msg := <-c.sendCh
 				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return
 				}
 			} else {
-				// 多条待发，合并 JSON 数组后单次写出
-				batched := make([][]byte, 0, pending+1)
-				batched = append(batched, message)
+				batched := make([][]byte, 0, pending)
 				for i := 0; i < pending; i++ {
 					batched = append(batched, <-c.sendCh)
 				}
@@ -211,9 +214,8 @@ func (c *Client) writePump() {
 				}
 			}
 
-		case <-ticker.C:
+		case <-pingTicker.C:
 			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
-				// 会话令牌到期前未收到有效 reauth，主动断开
 				c.Close(4008, "session expired")
 				continue
 			}

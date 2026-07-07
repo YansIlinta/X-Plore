@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	batchSize    = 4000
-	batchTimeout = 50 * time.Millisecond
+	batchSize    = 2000
+	batchTimeout = 20 * time.Millisecond
 )
 
 // WorkerPool 固定大小的 worker 池，消费 msgQueue，批量聚合后广播
