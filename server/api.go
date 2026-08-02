@@ -1,8 +1,8 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"runtime"
@@ -17,12 +17,13 @@ import (
 
 // API 处理所有 REST 接口和 WebSocket 升级
 type API struct {
-	hub       *Hub
-	upgrader  websocket.Upgrader
-	startTime time.Time
-	qpsCount  atomic.Int64 // 用于 QPS 计算
-	authToken string
-	historyDB HistoryQuerier // 历史弹幕查询接口（可选）
+	hub           *Hub
+	upgrader      websocket.Upgrader
+	startTime     time.Time
+	qpsCount      atomic.Int64 // 累计请求数（qpsMiddleware 累加）
+	lastSecondQPS atomic.Int64 // 最近一秒的请求数，由 StartQPSTracker 每秒刷新
+	authToken     string
+	historyDB     HistoryQuerier // 历史弹幕查询接口（可选）
 }
 
 // HistoryQuerier 历史弹幕查询接口
@@ -113,8 +114,8 @@ func (a *API) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// WebSocket 握手鉴权
-	if a.authToken != "" && token != a.authToken {
+	// WebSocket 握手鉴权（恒定时间比较，避免计时侧信道）
+	if a.authToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.authToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -161,7 +162,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"server_id":  a.hub.serverID,
 		"conn_count": a.hub.GetConnCount(),
 		"room_count": a.hub.GetRoomCount(),
-		"qps":        a.qpsCount.Load(),
+		"qps":        a.lastSecondQPS.Load(),
 		"heap_mb":    mem.HeapAlloc / 1024 / 1024,
 		"goroutines": runtime.NumGoroutine(),
 		"gc_count":   mem.NumGC,
@@ -271,30 +272,43 @@ func (a *API) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := &Message{
-		Type:     "broadcast",
-		RoomID:   req.RoomID,
-		UID:      "system",
-		Content:  req.Content,
-		ServerTS: time.Now().UnixMilli(),
-	}
-	data, _ := json.Marshal([]*Message{msg})
-
 	sentRooms := 0
 	if req.RoomID == "" {
-		rooms := a.hub.GetRoomList()
-		for _, room := range rooms {
-			a.hub.BroadcastToRoom(room.RoomID, data)
+		// 广播到（本机已知的）所有房间。跨机方面：仅覆盖在本机也存在的房间，
+		// 只存在于其它 server 的房间收不到 all-broadcast——见 REVIEW.md M2 已知限制。
+		for _, room := range a.hub.GetRoomList() {
+			a.broadcastRoom(room.RoomID, req.Content)
 			sentRooms++
 		}
 	} else {
-		a.hub.BroadcastToRoom(req.RoomID, data)
+		a.broadcastRoom(req.RoomID, req.Content)
 		sentRooms = 1
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"sent_rooms": sentRooms,
 	})
+}
+
+// broadcastRoom 生成一条系统广播消息，本机广播 + 经 Redis 跨机广播到其它 server。
+// SourceServer=本机 ID，使其它 server 收到后会重播、而本机通过 Redis 回环时会跳过（避免重复）。
+func (a *API) broadcastRoom(roomID, content string) {
+	msg := &Message{
+		Type:         "broadcast",
+		MsgID:        a.hub.nextMsgID(),
+		RoomID:       roomID,
+		UID:          "system",
+		Content:      content,
+		ServerTS:     time.Now().UnixMilli(),
+		SourceServer: a.hub.serverID,
+	}
+	data, _ := json.Marshal([]*Message{msg})
+	a.hub.BroadcastToRoom(roomID, data)
+	if a.hub.redisHub != nil {
+		if err := a.hub.redisHub.PublishBatch(roomID, data); err != nil {
+			log.Printf("[API] broadcast redis publish error: %v", err)
+		}
+	}
 }
 
 // GET /api/v1/clients?room=&page=&limit= - 客户端列表
@@ -425,25 +439,6 @@ func (a *API) handleSessionToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// QPS 计算 goroutine
-func (a *API) startQPSCounter() {
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		var lastCount int64
-		for {
-			select {
-			case <-a.hub.ctx.Done():
-				return
-			case <-ticker.C:
-				current := a.qpsCount.Load()
-				_ = current - lastCount
-				lastCount = current
-			}
-		}
-	}()
-}
-
 // parsePagination 解析分页参数，默认 page=1, limit=20, 最大 limit=100
 func parsePagination(r *http.Request) (int, int) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -499,7 +494,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// StartQPSTracker 启动 QPS 跟踪
+// StartQPSTracker 每秒用累计计数差值刷新最近一秒 QPS，供 /api/v1/stats 展示
 func (a *API) StartQPSTracker() {
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -511,37 +506,9 @@ func (a *API) StartQPSTracker() {
 				return
 			case <-ticker.C:
 				cur := a.qpsCount.Load()
-				qps := cur - last
+				a.lastSecondQPS.Store(cur - last)
 				last = cur
-				_ = qps
-				// QPS 值已在 /api/v1/stats 中暴露
 			}
 		}
 	}()
-
-	// 每秒重置 qps 计数用于 stats 接口展示
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-a.hub.ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-}
-
-// QPSValue 获取最近一秒的 QPS
-func (a *API) QPSValue() int64 {
-	return a.qpsCount.Load()
-}
-
-// formatUptime 格式化运行时长
-func formatUptime(d time.Duration) string {
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dh%dm%ds", h, m, s)
 }

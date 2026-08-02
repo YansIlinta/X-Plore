@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"sync"
 )
 
@@ -13,16 +12,18 @@ type Message struct {
 	UID          string `json:"uid,omitempty"`
 	Content      string `json:"content,omitempty"`
 	ClientTS     int64  `json:"client_ts,omitempty"`
+	ClientTSNano int64  `json:"client_ts_ns,omitempty"` // 客户端纳秒时间戳，服务端原样透传；压测端据此算亚毫秒级 E2E 延迟
 	ServerTS     int64  `json:"server_ts,omitempty"`
 	SourceServer string `json:"source_server,omitempty"` // 标记消息来源服务器，用于去重
 }
 
 // UpMessage 上行消息（客户端发往服务端）
 type UpMessage struct {
-	Type     string `json:"type"`
-	Content  string `json:"content"`
-	ClientTS int64  `json:"client_ts"`
-	Token    string `json:"token,omitempty"` // type=="reauth" 时携带的新会话令牌
+	Type         string `json:"type"`
+	Content      string `json:"content"`
+	ClientTS     int64  `json:"client_ts"`
+	ClientTSNano int64  `json:"client_ts_ns,omitempty"`
+	Token        string `json:"token,omitempty"` // type=="reauth" 时携带的新会话令牌
 }
 
 var messagePool = sync.Pool{
@@ -39,6 +40,7 @@ func acquireMessage() *Message {
 	msg.UID = ""
 	msg.Content = ""
 	msg.ClientTS = 0
+	msg.ClientTSNano = 0
 	msg.ServerTS = 0
 	msg.SourceServer = ""
 	return msg
@@ -46,36 +48,4 @@ func acquireMessage() *Message {
 
 func releaseMessage(msg *Message) {
 	messagePool.Put(msg)
-}
-
-// bufferPool 复用序列化 buffer
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 0, 4096)
-		return &buf
-	},
-}
-
-func acquireBuffer() *[]byte {
-	return bufferPool.Get().(*[]byte)
-}
-
-func releaseBuffer(buf *[]byte) {
-	*buf = (*buf)[:0]
-	bufferPool.Put(buf)
-}
-
-// serializeMessages 批量序列化消息为 JSON 数组，使用 buffer pool
-func serializeMessages(msgs []*Message) ([]byte, error) {
-	buf := acquireBuffer()
-	defer releaseBuffer(buf)
-
-	data, err := json.Marshal(msgs)
-	if err != nil {
-		return nil, err
-	}
-	// 返回新分配的 slice，因为 buf 会被回收
-	result := make([]byte, len(data))
-	copy(result, data)
-	return result, nil
 }

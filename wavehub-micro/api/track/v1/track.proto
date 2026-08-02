@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package api.track.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/YansIlinta/wavehub-micro/api/track/v1;v1";
+
+service Track {
+  rpc CreateTrack(CreateTrackRequest) returns (CreateTrackReply) {
+    option (google.api.http) = {
+      post: "/v1/tracks"
+      body: "*"
+    };
+  }
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadReply) {
+    option (google.api.http) = {
+      post: "/v1/tracks/{id}/complete"
+      body: "*"
+    };
+  }
+  rpc ListTracks(ListTracksRequest) returns (ListTracksReply) {
+    option (google.api.http) = {get: "/v1/tracks"};
+  }
+  rpc GetTrack(GetTrackRequest) returns (TrackInfo) {
+    option (google.api.http) = {get: "/v1/tracks/{id}"};
+  }
+  // 内部接口：media worker 处理完成后回写结果。
+  // 关键设计：tracks 表归 track 服务所有，media 不许直接写库，只能通过这个 RPC 回来 ——
+  // "数据归属服务所有"是微服务最重要的纪律，破坏它 = 分布式单体。
+  rpc ReportProcessed(ReportProcessedRequest) returns (ReportProcessedReply);
+}
+
+message CreateTrackRequest {
+  string title = 1;
+}
+
+message CreateTrackReply {
+  uint64 id = 1;
+  string upload_url = 2; // MinIO 预签名直传 URL：客户端拿它直接 PUT 音频，流量不经过本服务
+}
+
+message CompleteUploadRequest {
+  uint64 id = 1;
+  // 曾有 object_key = 2：文件位置改为服务端在创建时分配，客户端无权指定(防止覆盖他人文件)。
+  // proto 演进规矩：删字段必须 reserved 编号和名字，防止后人复用造成新旧客户端解码错乱
+  reserved 2;
+  reserved "object_key";
+}
+
+message CompleteUploadReply {
+  string status = 1;
+}
+
+message ListTracksRequest {
+  int32 page = 1;
+  int32 size = 2;
+}
+
+message TrackInfo {
+  uint64 id = 1;
+  string title = 2;
+  uint64 user_id = 3;
+  string author = 4; // 来自 user 服务的 gRPC 调用，不是本地 JOIN
+  string status = 5;
+  double duration_sec = 6;
+  int64 play_count = 7;
+  repeated float peaks = 8; // 波形峰值，详情页才返回
+  string stream_url = 9;    // 预签名播放地址(1小时有效)，status=ready 后才有
+}
+
+message ListTracksReply {
+  repeated TrackInfo list = 1;
+}
+
+message GetTrackRequest {
+  uint64 id = 1;
+}
+
+message ReportProcessedRequest {
+  uint64 id = 1;
+  bool success = 2;
+  double duration_sec = 3;
+  repeated float peaks = 4;
+}
+
+message ReportProcessedReply {}

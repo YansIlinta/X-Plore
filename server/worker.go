@@ -92,7 +92,7 @@ func (wp *WorkerPool) worker(id int) {
 			// 跨机广播：Redis Pub/Sub（整房间一批消息单次 PUBLISH）和/或 Kafka（逐条，保留 Kafka 分区/持久化语义）
 			wp.publishRoomBatch(roomID, data, msgs)
 
-			metricMessagesTotal.WithLabelValues(roomID, "out").Add(float64(len(msgs)))
+			metricMessagesTotal.WithLabelValues("out").Add(float64(len(msgs)))
 			now := time.Now()
 			for _, msg := range msgs {
 				metricBroadcastLatency.Observe(now.Sub(time.UnixMilli(msg.ServerTS)).Seconds())

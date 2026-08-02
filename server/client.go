@@ -127,13 +127,14 @@ func (c *Client) readPump() {
 		msg.UID = c.uid
 		msg.Content = content
 		msg.ClientTS = up.ClientTS
+		msg.ClientTSNano = up.ClientTSNano
 		msg.ServerTS = time.Now().UnixMilli()
 		msg.SourceServer = c.hub.serverID
 
 		// 投递到进程内消息队列（带缓冲 channel 做削峰）
 		select {
 		case c.hub.msgQueue <- msg:
-			metricMessagesTotal.WithLabelValues(c.roomID, "in").Inc()
+			metricMessagesTotal.WithLabelValues("in").Inc()
 		default:
 			// 队列满，丢弃消息
 			releaseMessage(msg)

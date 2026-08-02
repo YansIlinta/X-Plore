@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -25,21 +24,32 @@ import (
 // --- 消息结构 ---
 
 type UpMessage struct {
-	Type     string `json:"type"`
-	Content  string `json:"content"`
-	ClientTS int64  `json:"client_ts"`
+	Type         string `json:"type"`
+	Content      string `json:"content"`
+	ClientTS     int64  `json:"client_ts"`
+	ClientTSNano int64  `json:"client_ts_ns"`
 }
 
 type DownMessage struct {
-	Type     string `json:"type"`
-	RoomID   string `json:"room_id"`
-	UID      string `json:"uid"`
-	Content  string `json:"content"`
-	ClientTS int64  `json:"client_ts"`
-	ServerTS int64  `json:"server_ts"`
+	Type         string `json:"type"`
+	RoomID       string `json:"room_id"`
+	UID          string `json:"uid"`
+	Content      string `json:"content"`
+	ClientTS     int64  `json:"client_ts"`
+	ClientTSNano int64  `json:"client_ts_ns"`
+	ServerTS     int64  `json:"server_ts"`
 }
 
 // --- 指标收集 ---
+
+// e2eShard 端到端延迟直方图的一个分片。hdrhistogram 非线程安全，需加锁；
+// 但万级连接下若共用一把锁，数百万次记录会严重串行化——既拖垮读取吞吐、
+// 又把测得的延迟灌水（消息在缓冲里等锁的时间被算进延迟）。故按连接分片，
+// 每片独立锁，report 时合并。
+type e2eShard struct {
+	mu sync.Mutex
+	h  *hdrhistogram.Histogram
+}
 
 type Metrics struct {
 	// 连接层
@@ -47,29 +57,40 @@ type Metrics struct {
 	successConns  atomic.Int64
 	failedConns   atomic.Int64
 	activeConns   atomic.Int64
-	connLatencyHR *hdrhistogram.Histogram // 建连耗时（微秒）
+	connLatencyHR *hdrhistogram.Histogram // 建连耗时（微秒），每连接仅一次，低频，共用 mu 即可
 
 	// 吞吐层
-	sendCount    atomic.Int64
-	recvCount    atomic.Int64
-	dropCount    atomic.Int64
+	sendCount atomic.Int64
+	recvCount atomic.Int64
+	dropCount atomic.Int64
 
-	// 延迟层（端到端，微秒）
-	e2eLatencyHR *hdrhistogram.Histogram
+	// 延迟层（端到端，微秒），分片降低锁竞争
+	e2eShards []*e2eShard
 
 	// 错误层
 	writeErrors atomic.Int64
 	readErrors  atomic.Int64
 	timeouts    atomic.Int64
 
-	mu sync.Mutex // 保护 histogram 的并发写入
+	mu sync.Mutex // 仅保护 connLatencyHR
 }
 
 func NewMetrics(targetConns int64) *Metrics {
+	nShards := runtime.NumCPU()
+	if nShards < 8 {
+		nShards = 8
+	}
+	if nShards > 256 {
+		nShards = 256
+	}
+	shards := make([]*e2eShard, nShards)
+	for i := range shards {
+		shards[i] = &e2eShard{h: hdrhistogram.New(1, 60_000_000_000, 3)} // 1μs ~ 60000s
+	}
 	return &Metrics{
 		targetConns:   targetConns,
-		connLatencyHR: hdrhistogram.New(1, 60_000_000, 3),   // 1μs ~ 60s
-		e2eLatencyHR:  hdrhistogram.New(1, 60_000_000_000, 3), // 1μs ~ 60000s
+		connLatencyHR: hdrhistogram.New(1, 60_000_000, 3), // 1μs ~ 60s
+		e2eShards:     shards,
 	}
 }
 
@@ -79,14 +100,27 @@ func (m *Metrics) RecordConnLatency(d time.Duration) {
 	m.mu.Unlock()
 }
 
-func (m *Metrics) RecordE2ELatency(d time.Duration) {
+// RecordE2ELatency 按 shardIdx 落到某个分片记录，避免全局锁竞争
+func (m *Metrics) RecordE2ELatency(shardIdx int, d time.Duration) {
 	us := d.Microseconds()
 	if us < 1 {
 		us = 1
 	}
-	m.mu.Lock()
-	m.e2eLatencyHR.RecordValue(us)
-	m.mu.Unlock()
+	s := m.e2eShards[shardIdx%len(m.e2eShards)]
+	s.mu.Lock()
+	s.h.RecordValue(us)
+	s.mu.Unlock()
+}
+
+// e2eMerged 合并所有分片为一个直方图，供快照/报告读取分位数
+func (m *Metrics) e2eMerged() *hdrhistogram.Histogram {
+	merged := hdrhistogram.New(1, 60_000_000_000, 3)
+	for _, s := range m.e2eShards {
+		s.mu.Lock()
+		merged.Merge(s.h)
+		s.mu.Unlock()
+	}
+	return merged
 }
 
 // --- 每秒统计快照 ---
@@ -166,11 +200,10 @@ func main() {
 				var mem runtime.MemStats
 				runtime.ReadMemStats(&mem)
 
-				metrics.mu.Lock()
-				p50 := metrics.e2eLatencyHR.ValueAtPercentile(50)
-				p90 := metrics.e2eLatencyHR.ValueAtPercentile(90)
-				p99 := metrics.e2eLatencyHR.ValueAtPercentile(99)
-				metrics.mu.Unlock()
+				e2e := metrics.e2eMerged()
+				p50 := e2e.ValueAtPercentile(50)
+				p90 := e2e.ValueAtPercentile(90)
+				p99 := e2e.ValueAtPercentile(99)
 
 				snap := Snapshot{
 					Time:         time.Now().Format("15:04:05"),
@@ -227,10 +260,10 @@ func main() {
 		roomID := fmt.Sprintf("room-%d", i%*rooms)
 		serverURL := serverList[i%len(serverList)]
 
-		go func(uid, roomID, serverURL string) {
+		go func(connIdx int, uid, roomID, serverURL string) {
 			defer wg.Done()
-			runClient(ctx, metrics, serverURL, uid, roomID, *token, *rate, *duration, startTime)
-		}(uid, roomID, serverURL)
+			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime)
+		}(i, uid, roomID, serverURL)
 
 		time.Sleep(rampDelay)
 	}
@@ -258,7 +291,7 @@ waitDone:
 }
 
 // runClient 单个压测连接
-func runClient(ctx context.Context, m *Metrics, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time) {
+func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time) {
 	// 建连
 	wsURL := fmt.Sprintf("%s/ws?uid=%s&room=%s&token=%s", serverURL, uid, roomID, token)
 
@@ -275,7 +308,13 @@ func runClient(ctx context.Context, m *Metrics, serverURL, uid, roomID, token st
 	m.successConns.Add(1)
 	m.activeConns.Add(1)
 	m.RecordConnLatency(connDur)
+
+	// closing 标志：收尾时是"我们主动关连接"，reader 观察到的错误属正常，不计 readError。
+	// 先置位再 Close（defer 内首行），使 reader 在拿到错误时能读到 true，
+	// 区分"测试结束的主动关闭"与"服务端异常断开的真实读错误"。
+	var closing atomic.Bool
 	defer func() {
+		closing.Store(true)
 		conn.Close()
 		m.activeConns.Add(-1)
 	}()
@@ -294,7 +333,7 @@ func runClient(ctx context.Context, m *Metrics, serverURL, uid, roomID, token st
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
-				if ctx.Err() == nil {
+				if ctx.Err() == nil && !closing.Load() {
 					m.readErrors.Add(1)
 				}
 				return
@@ -312,13 +351,22 @@ func runClient(ctx context.Context, m *Metrics, serverURL, uid, roomID, token st
 				}
 			}
 
-			now := time.Now().UnixMilli()
+			nowNano := time.Now().UnixNano()
 			for _, msg := range msgs {
+				// 跳过服务端控制消息（限流提示/会话令牌/续期 ack），只统计真实弹幕
+				switch msg.Type {
+				case "rate_limited", "session_token", "reauth_ack":
+					continue
+				}
 				m.recvCount.Add(1)
-				if msg.ClientTS > 0 {
-					latency := now - msg.ClientTS
-					if latency > 0 {
-						m.RecordE2ELatency(time.Duration(latency) * time.Millisecond)
+				// 优先用纳秒时间戳算 E2E 延迟（亚毫秒精度）；回退到毫秒字段
+				if msg.ClientTSNano > 0 {
+					if latency := nowNano - msg.ClientTSNano; latency > 0 {
+						m.RecordE2ELatency(connIdx, time.Duration(latency))
+					}
+				} else if msg.ClientTS > 0 {
+					if latency := nowNano/1e6 - msg.ClientTS; latency > 0 {
+						m.RecordE2ELatency(connIdx, time.Duration(latency)*time.Millisecond)
 					}
 				}
 			}
@@ -343,10 +391,12 @@ func runClient(ctx context.Context, m *Metrics, serverURL, uid, roomID, token st
 				if time.Since(startTime) > duration {
 					return
 				}
+				now := time.Now()
 				msg := UpMessage{
-					Type:     "danmu",
-					Content:  content,
-					ClientTS: time.Now().UnixMilli(),
+					Type:         "danmu",
+					Content:      content,
+					ClientTS:     now.UnixMilli(),
+					ClientTSNano: now.UnixNano(),
 				}
 				data, _ := json.Marshal(msg)
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -372,6 +422,7 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
+	e2e := m.e2eMerged()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -410,13 +461,13 @@ func printReport(m *Metrics, elapsed time.Duration) {
 
 	// 延迟层
 	fmt.Println("--- End-to-End Latency ---")
-	if m.e2eLatencyHR.TotalCount() > 0 {
-		fmt.Printf("  P50:   %d μs (%.1f ms)\n", m.e2eLatencyHR.ValueAtPercentile(50), float64(m.e2eLatencyHR.ValueAtPercentile(50))/1000)
-		fmt.Printf("  P90:   %d μs (%.1f ms)\n", m.e2eLatencyHR.ValueAtPercentile(90), float64(m.e2eLatencyHR.ValueAtPercentile(90))/1000)
-		fmt.Printf("  P99:   %d μs (%.1f ms)\n", m.e2eLatencyHR.ValueAtPercentile(99), float64(m.e2eLatencyHR.ValueAtPercentile(99))/1000)
-		fmt.Printf("  P999:  %d μs (%.1f ms)\n", m.e2eLatencyHR.ValueAtPercentile(99.9), float64(m.e2eLatencyHR.ValueAtPercentile(99.9))/1000)
-		fmt.Printf("  Max:   %d μs (%.1f ms)\n", m.e2eLatencyHR.Max(), float64(m.e2eLatencyHR.Max())/1000)
-		fmt.Printf("  Mean:  %.0f μs (%.1f ms)\n", m.e2eLatencyHR.Mean(), m.e2eLatencyHR.Mean()/1000)
+	if e2e.TotalCount() > 0 {
+		fmt.Printf("  P50:   %d μs (%.1f ms)\n", e2e.ValueAtPercentile(50), float64(e2e.ValueAtPercentile(50))/1000)
+		fmt.Printf("  P90:   %d μs (%.1f ms)\n", e2e.ValueAtPercentile(90), float64(e2e.ValueAtPercentile(90))/1000)
+		fmt.Printf("  P99:   %d μs (%.1f ms)\n", e2e.ValueAtPercentile(99), float64(e2e.ValueAtPercentile(99))/1000)
+		fmt.Printf("  P999:  %d μs (%.1f ms)\n", e2e.ValueAtPercentile(99.9), float64(e2e.ValueAtPercentile(99.9))/1000)
+		fmt.Printf("  Max:   %d μs (%.1f ms)\n", e2e.Max(), float64(e2e.Max())/1000)
+		fmt.Printf("  Mean:  %.0f μs (%.1f ms)\n", e2e.Mean(), e2e.Mean()/1000)
 	} else {
 		fmt.Println("  (no latency data)")
 	}
@@ -441,8 +492,7 @@ func printReport(m *Metrics, elapsed time.Duration) {
 
 // exportJSON 导出 JSON 报告
 func exportJSON(path string, snapshots []Snapshot, m *Metrics) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	e2e := m.e2eMerged()
 
 	report := map[string]interface{}{
 		"summary": map[string]interface{}{
@@ -451,11 +501,11 @@ func exportJSON(path string, snapshots []Snapshot, m *Metrics) {
 			"failed_conns":  m.failedConns.Load(),
 			"total_sent":    m.sendCount.Load(),
 			"total_recv":    m.recvCount.Load(),
-			"e2e_p50_us":    m.e2eLatencyHR.ValueAtPercentile(50),
-			"e2e_p90_us":    m.e2eLatencyHR.ValueAtPercentile(90),
-			"e2e_p99_us":    m.e2eLatencyHR.ValueAtPercentile(99),
-			"e2e_p999_us":   m.e2eLatencyHR.ValueAtPercentile(99.9),
-			"e2e_max_us":    m.e2eLatencyHR.Max(),
+			"e2e_p50_us":    e2e.ValueAtPercentile(50),
+			"e2e_p90_us":    e2e.ValueAtPercentile(90),
+			"e2e_p99_us":    e2e.ValueAtPercentile(99),
+			"e2e_p999_us":   e2e.ValueAtPercentile(99.9),
+			"e2e_max_us":    e2e.Max(),
 		},
 		"snapshots": snapshots,
 	}
@@ -483,9 +533,4 @@ func exportCSV(path string, snapshots []Snapshot) {
 			s.WriteErrors, s.ReadErrors, s.Goroutines, s.HeapMB)
 	}
 	log.Printf("[loadtest] CSV report written to %s", path)
-}
-
-// init 初始化随机数种子
-func init() {
-	rand.Seed(time.Now().UnixNano())
 }

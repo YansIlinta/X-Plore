@@ -8,14 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 )
 
-// Message 与 server 包的 Message 保持一致
+// Message 与 server/core 包的 Message 保持一致
 type Message struct {
 	Type         string `json:"type"`
 	MsgID        string `json:"msg_id,omitempty"`
@@ -25,6 +24,7 @@ type Message struct {
 	ClientTS     int64  `json:"client_ts,omitempty"`
 	ServerTS     int64  `json:"server_ts,omitempty"`
 	SourceServer string `json:"source_server,omitempty"`
+	OffsetMS     int64  `json:"offset_ms,omitempty"` // 点播进度；CH 表可后续加列
 }
 
 func main() {
@@ -71,92 +71,92 @@ func runStorageConsumer(ctx context.Context, brokers []string, topic, chAddr, ch
 	}
 	defer db.Close()
 
+	// CommitInterval=0 关闭自动提交：offset 必须在 ClickHouse 落库成功后才提交，
+	// 避免"读即提交、落库前崩溃"导致 offset 前进但数据丢失（原实现是 at-most-once）。
+	// 改为 FetchMessage 读取（不提交）+ 落库成功后 CommitMessages 显式提交，得到 at-least-once。
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        brokers,
-		Topic:          topic,
-		GroupID:        "danmu-storage", // 消费组 ID
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		CommitInterval: time.Second,
-		StartOffset:    kafka.FirstOffset,
+		Brokers:     brokers,
+		Topic:       topic,
+		GroupID:     "danmu-storage",
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		StartOffset: kafka.FirstOffset,
 	})
 	defer reader.Close()
 
-	// 批量写入缓冲
-	var (
-		batch   []Message
-		batchMu sync.Mutex
-	)
-
-	// 定时 flush goroutine
+	// 单 goroutine 拥有 batch/pending，无需锁：fetch goroutine 只负责把消息喂进 channel
+	msgCh := make(chan kafka.Message, 2000)
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
 		for {
+			m, err := reader.FetchMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[storage-consumer] fetch error: %v", err)
+				time.Sleep(time.Second)
+				continue
+			}
 			select {
+			case msgCh <- m:
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				batchMu.Lock()
-				if len(batch) > 0 {
-					toFlush := make([]Message, len(batch))
-					copy(toFlush, batch)
-					batch = batch[:0]
-					batchMu.Unlock()
-					if err := db.BatchInsert(toFlush); err != nil {
-						log.Printf("[storage-consumer] batch insert error: %v", err)
-					} else {
-						log.Printf("[storage-consumer] flushed %d messages", len(toFlush))
-					}
-				} else {
-					batchMu.Unlock()
-				}
 			}
 		}
 	}()
 
+	var (
+		batch   []Message       // 待落库的解码消息
+		pending []kafka.Message // 与 batch 一一对应的原始消息，落库成功后用于提交 offset
+	)
+
+	// flush 落库并提交 offset。落库失败则保留缓冲、不提交，下次重试（at-least-once，
+	// 依赖 ClickHouse 侧幂等/去重容忍极少量重复）。
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if err := db.BatchInsert(batch); err != nil {
+			log.Printf("[storage-consumer] batch insert error (will retry, offset not committed): %v", err)
+			return
+		}
+		if err := reader.CommitMessages(ctx, pending...); err != nil {
+			// 落库已成功但提交失败：下次会重读这批 → 重复插入（可接受的 at-least-once）
+			log.Printf("[storage-consumer] commit error: %v", err)
+		}
+		log.Printf("[storage-consumer] flushed %d messages", len(batch))
+		batch = batch[:0]
+		pending = pending[:0]
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
-		msg, err := reader.ReadMessage(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
+		select {
+		case <-ctx.Done():
+			flush() // 退出前尽力落库剩余
+			log.Println("[storage-consumer] stopped")
+			return
+		case m := <-msgCh:
+			var danmu Message
+			if err := json.Unmarshal(m.Value, &danmu); err != nil {
+				log.Printf("[storage-consumer] unmarshal error: %v", err)
+				// 解析失败的坏消息也要提交，否则会卡住该 partition
+				if err := reader.CommitMessages(ctx, m); err != nil {
+					log.Printf("[storage-consumer] commit poison msg error: %v", err)
+				}
+				continue
 			}
-			log.Printf("[storage-consumer] read error: %v", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		var danmu Message
-		if err := json.Unmarshal(msg.Value, &danmu); err != nil {
-			log.Printf("[storage-consumer] unmarshal error: %v", err)
-			continue
-		}
-
-		batchMu.Lock()
-		batch = append(batch, danmu)
-		needFlush := len(batch) >= 1000
-		batchMu.Unlock()
-
-		if needFlush {
-			batchMu.Lock()
-			toFlush := make([]Message, len(batch))
-			copy(toFlush, batch)
-			batch = batch[:0]
-			batchMu.Unlock()
-			if err := db.BatchInsert(toFlush); err != nil {
-				log.Printf("[storage-consumer] batch insert error: %v", err)
+			batch = append(batch, danmu)
+			pending = append(pending, m)
+			if len(batch) >= 1000 {
+				flush()
 			}
+		case <-ticker.C:
+			flush()
 		}
 	}
-
-	// 退出前 flush 剩余
-	batchMu.Lock()
-	if len(batch) > 0 {
-		db.BatchInsert(batch)
-	}
-	batchMu.Unlock()
-
-	log.Println("[storage-consumer] stopped")
 }
 
 // runBroadcastConsumer 实时广播消费组（示例：通过 Kafka 做跨机广播的备选方案）

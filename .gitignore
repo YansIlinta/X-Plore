@@ -1,7 +1,9 @@
-*.exe
-*.db
-*.sqlite
-bin/
+﻿# secrets / build artifacts
 .env
-danmu_history.db
-*.log
+.env.*
+!.env.example
+*.exe
+node_modules/
+web-app/dist/
+wavehub-micro/bin/
+**/bin/

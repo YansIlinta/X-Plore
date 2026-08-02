@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -113,8 +112,9 @@ func (h *Hub) addClient(c *Client) {
 		old.cancel()
 	}
 	room[c.uid] = c
-	metricConnectionsTotal.WithLabelValues(c.roomID).Inc()
-	log.Printf("[Hub] client joined: uid=%s room=%s, room_size=%d", c.uid, c.roomID, len(room))
+	metricConnectionsTotal.Inc()
+	// 不在此处按连接打日志：万级/百万级连接下，单条 log.Printf 走序列化的
+	// Hub.Run 单 goroutine，会显著抬高建连延迟。连接计数由 metric/stats 观测。
 }
 
 func (h *Hub) removeClient(c *Client) {
@@ -196,6 +196,15 @@ func (h *Hub) GetRoomList() []RoomInfo {
 		shard.mu.RUnlock()
 	}
 	return rooms
+}
+
+// HasRoom 判断本机是否持有该房间（廉价的 RLock 读，用于 Redis 订阅侧短路）
+func (h *Hub) HasRoom(roomID string) bool {
+	shard := h.shardFor(roomID)
+	shard.mu.RLock()
+	_, ok := shard.rooms[roomID]
+	shard.mu.RUnlock()
+	return ok
 }
 
 // GetRoomClients 获取房间内的 uid 列表

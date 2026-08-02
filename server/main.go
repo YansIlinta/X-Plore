@@ -25,7 +25,15 @@ func main() {
 	kafkaTopic := flag.String("kafka-topic", "danmu-history", "Kafka topic name")
 	mqMode := flag.String("mq", "both", "MQ mode: redis|kafka|both")
 	pprofAddr := flag.String("pprof", ":6060", "pprof listen address")
+	sessionTTLFlag := flag.Duration("session-ttl", 10*time.Minute, "会话令牌有效期，到期未 reauth 则断开长连接")
+	chAddr := flag.String("clickhouse-addr", "", "ClickHouse 只读地址(native TCP)，配置后 /api/v1/history 才可用；空=禁用历史查询")
+	chDatabase := flag.String("clickhouse-db", "default", "ClickHouse database")
+	chUser := flag.String("clickhouse-user", "default", "ClickHouse username")
+	chPassword := flag.String("clickhouse-password", "", "ClickHouse password")
 	flag.Parse()
+
+	// 在启动任何连接前设置会话 TTL（运行期只读）
+	sessionTTL = *sessionTTLFlag
 
 	// 鉴权 token 从环境变量读取
 	authToken := os.Getenv("DANMU_AUTH_TOKEN")
@@ -79,6 +87,18 @@ func main() {
 	// API
 	api := NewAPI(hub, authToken)
 	api.StartQPSTracker()
+
+	// 可选：接入 ClickHouse 只读连接，启用 /api/v1/history 历史查询
+	if *chAddr != "" {
+		historyDB, err := NewHistoryDB(*chAddr, *chDatabase, *chUser, *chPassword)
+		if err != nil {
+			log.Printf("[WARN] ClickHouse history disabled: %v", err)
+		} else {
+			api.historyDB = historyDB
+			log.Printf("[main] history query enabled via ClickHouse %s", *chAddr)
+			defer historyDB.Close()
+		}
+	}
 
 	mux := http.NewServeMux()
 	api.SetupRoutes(mux)

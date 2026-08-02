@@ -18,8 +18,9 @@ var (
 
 // sessionTTL 会话令牌有效期：WebSocket 握手时用的静态 token 只鉴权一次，
 // 连接建立后由服务端签发一个短时效的会话令牌，客户端需在到期前通过 "reauth"
-// 消息用刷新到的新令牌续期，否则服务端在到期后主动断开连接
-const sessionTTL = 10 * time.Minute
+// 消息用刷新到的新令牌续期，否则服务端在到期后主动断开连接。
+// 由 main 通过 -session-ttl 覆盖（在启动任何连接前设置一次，运行期只读）。
+var sessionTTL = 10 * time.Minute
 
 // TokenIssuer 签发/校验带过期时间、绑定 uid+room 的会话令牌（HMAC-SHA256签名）
 // 签名密钥并非直接使用 DANMU_AUTH_TOKEN 本身，而是派生密钥——避免会话令牌的

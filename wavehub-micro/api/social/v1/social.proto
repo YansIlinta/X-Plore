@@ -1,0 +1,67 @@
+// X-Plore 社交关系服务契约:关注/粉丝 + UP 主公开信息(V2,见 ROADMAP-V2.md)。
+// 用户名等基础信息经 gRPC 调 user 服务,本服务只落关注关系(user_follows)。
+syntax = "proto3";
+
+package api.social.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/YansIlinta/wavehub-micro/api/social/v1;v1";
+
+service Social {
+  // toggle 关注(JWT);不能关注自己
+  rpc ToggleFollow(ToggleFollowRequest) returns (ToggleFollowReply) {
+    option (google.api.http) = {
+      post: "/v1/users/{id}/follow"
+      body: "*"
+    };
+  }
+  // UP 主公开信息;带 token 时返回当前用户是否已关注
+  rpc GetProfile(GetProfileRequest) returns (Profile) {
+    option (google.api.http) = {get: "/v1/users/{id}/profile"};
+  }
+  rpc ListFollowings(ListFollowRequest) returns (ListFollowReply) {
+    option (google.api.http) = {get: "/v1/users/{id}/followings"};
+  }
+  rpc ListFollowers(ListFollowRequest) returns (ListFollowReply) {
+    option (google.api.http) = {get: "/v1/users/{id}/followers"};
+  }
+}
+
+message ToggleFollowRequest {
+  uint64 id = 1; // 被关注人
+}
+
+message ToggleFollowReply {
+  bool following = 1;
+  int64 follower_count = 2; // 被关注人最新粉丝数
+}
+
+message GetProfileRequest {
+  uint64 id = 1;
+}
+
+message Profile {
+  uint64 id = 1;
+  string username = 2;
+  int64 follower_count = 3;
+  int64 following_count = 4;
+  bool following = 5; // 当前用户是否已关注(未登录 false)
+}
+
+message ListFollowRequest {
+  uint64 id = 1;
+  int32 page = 2;
+  int32 size = 3;
+}
+
+message FollowUser {
+  uint64 id = 1;
+  string username = 2;
+  int64 created_at = 3; // 关注时间 unix ms
+}
+
+message ListFollowReply {
+  repeated FollowUser list = 1;
+  int32 total = 2;
+}

@@ -1,3 +1,19 @@
+# X-Plore
+
+仓库内两条可演示主线：
+
+| 主线 | 说明 | 入口文档 |
+|------|------|----------|
+| **高并发弹幕** | WebSocket 长连接、单体 + goim 微服务、压测 | **[PROJECT.md](./PROJECT.md)** · 下文 |
+| **点播平台 MVP** | Kratos 用户/稿件/HLS、React 播放弹幕互动、Gateway | **[DEMO.md](./DEMO.md)** · [EVOLUTION.md](./EVOLUTION.md) |
+| **面试题库 ~100** | 题目+代码锚点 / 答案分册 | **[interview/](./interview/)** · [QUESTIONS](./interview/QUESTIONS.md) · [ANSWERS](./interview/ANSWERS.md) |
+
+> **演示怎么讲、怎么起**：优先打开 **[DEMO.md](./DEMO.md)**。  
+> **弹幕统合总览**（架构取舍、压测摘要）：**[PROJECT.md](./PROJECT.md)**。  
+> 本文档侧重弹幕单体运维、压测剧本与系统调优。
+
+---
+
 # 百万 QPS 直播弹幕系统
 
 高并发直播弹幕系统，支持多机部署、百万级 WebSocket 长连接、Redis 跨机实时广播、Kafka 持久化与多消费组。

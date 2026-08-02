@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -49,26 +50,6 @@ func (rh *RedisHub) PublishBatch(roomID string, data []byte) error {
 	return rh.client.Publish(rh.ctx, channel, data).Err()
 }
 
-// SubscribeRoom 订阅指定房间的频道
-func (rh *RedisHub) SubscribeRoom(roomID string) {
-	channel := fmt.Sprintf("room:%s", roomID)
-	sub := rh.client.Subscribe(rh.ctx, channel)
-	defer sub.Close()
-
-	ch := sub.Channel()
-	for {
-		select {
-		case <-rh.ctx.Done():
-			return
-		case redisMsg, ok := <-ch:
-			if !ok {
-				return
-			}
-			rh.handleIncoming(redisMsg.Payload)
-		}
-	}
-}
-
 // SubscribePattern 用模式订阅所有房间频道
 func (rh *RedisHub) SubscribePattern() {
 	sub := rh.client.PSubscribe(rh.ctx, "room:*")
@@ -83,15 +64,22 @@ func (rh *RedisHub) SubscribePattern() {
 			if !ok {
 				return
 			}
-			rh.handleIncoming(redisMsg.Payload)
+			rh.handleIncoming(redisMsg.Channel, redisMsg.Payload)
 		}
 	}
 }
 
 // handleIncoming 处理一条 Redis Pub/Sub 载荷（一个房间一批消息的 JSON 数组）
-// 一批消息都由同一个 worker.flush() 在本机生成，SourceServer 恒相同，
-// 只需看首条即可判断是否为本机发出（避免回环重复广播）
-func (rh *RedisHub) handleIncoming(payload string) {
+// 优化：channel 名形如 room:{roomId}，先据此判断本机是否持有该房间——
+// 若不持有则直接丢弃，避免对"注定要广播给别人房间"的 payload 做无谓的 JSON 反序列化
+// （模式订阅会收到全网所有房间的消息，N 台机 × 全量消息的解析开销是横向扩展的瓶颈）。
+// 只有本机持有该房间时才反序列化，并看首条的 SourceServer 判断是否为本机发出（避免回环）。
+func (rh *RedisHub) handleIncoming(channel, payload string) {
+	roomID := strings.TrimPrefix(channel, "room:")
+	if roomID == "" || !rh.hub.HasRoom(roomID) {
+		return
+	}
+
 	var msgs []*Message
 	if err := json.Unmarshal([]byte(payload), &msgs); err != nil {
 		log.Printf("[RedisHub] unmarshal error: %v", err)
@@ -101,7 +89,7 @@ func (rh *RedisHub) handleIncoming(payload string) {
 		return
 	}
 	// payload 已经是目标广播格式（[]Message 的 JSON 数组），直接转发给客户端，无需重新 Marshal
-	rh.hub.BroadcastToRoom(msgs[0].RoomID, []byte(payload))
+	rh.hub.BroadcastToRoom(roomID, []byte(payload))
 }
 
 // Close 关闭 Redis 连接
