@@ -1,9 +1,14 @@
-﻿# secrets / build artifacts
+# secrets
 .env
 .env.*
 !.env.example
+
+# build artifacts
 *.exe
-node_modules/
-web-app/dist/
-wavehub-micro/bin/
 **/bin/
+bin-linux/
+wavehub/web-app/dist/
+danmu/*/logs/
+
+# deps
+node_modules/

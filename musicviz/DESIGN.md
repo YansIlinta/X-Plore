@@ -2,7 +2,7 @@
 
 > 状态：设计阶段，未开工。
 > 关系：独立于 WaveHub（平台）的本地应用；后端复用 WaveHub 学到的 Gin 技能，
-> 未来微服务化时直接套用 wavehub-micro 的既有模式。
+> 未来微服务化时直接套用 wavehub/micro 的既有模式。
 
 ---
 
@@ -27,7 +27,7 @@
 | **M2 歌词** | LRC 文件导入与解析、逐行滚动高亮、无 LRC 时的纯视觉模式 | 需求 3 |
 | **M3 在线搜索** | 按文件名/手动关键词搜元数据+歌词（走自建 Gin 代理） | 需求 2 |
 | **M4 背景系统** | 多背景预设库、用户导入图片/视频做背景、背景与可视化叠加规则 | 需求 3、4 |
-| **M5 后端/微服务** | 账号、云端收藏歌词库、设置同步（复用 wavehub-micro 模式） | 你说的"可能" |
+| **M5 后端/微服务** | 账号、云端收藏歌词库、设置同步（复用 wavehub/micro 模式） | 你说的"可能" |
 
 **M1 刻意最小**：能拖一个 mp3 进来、看到黑底白线的频谱在动，就是第一个里程碑完成。
 
@@ -81,8 +81,8 @@
 
 - 一个 main.go + 一个 handler，比 wavehub 还小，半天工作量；
 - **微服务版（M5）**：这个代理天然就是第一个服务（search 服务）；账号/收藏起来后按
-  wavehub-micro 的模式拆 user / library 服务，proto 契约、JWT、数据归属那套纪律原样平移。
-  文档不重复写，届时直接参照 `wavehub-micro/MICROSERVICES.md`。
+  wavehub/micro 的模式拆 user / library 服务，proto 契约、JWT、数据归属那套纪律原样平移。
+  文档不重复写，届时直接参照 `wavehub/micro/MICROSERVICES.md`。
 
 ### 3.6 本地数据：IndexedDB（通过 localForage）
 

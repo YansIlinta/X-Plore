@@ -1,0 +1,19 @@
+# 一次编译出 goim 全链路的所有二进制；各 compose 服务用 command 选择运行哪个。
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+# 先拷模块文件（含本地 replace 的 minirpc）以利用缓存
+COPY go.mod go.sum ./
+COPY minirpc/ ./minirpc/
+RUN go mod download || true
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/registry ./cmd/registry/ \
+ && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/logic    ./logic/ \
+ && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/job      ./job/ \
+ && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/comet    ./comet/
+# 注：Kafka→ClickHouse 落库的 consumer 属架构无关的公共组件，仍在 ../monolith，
+# 由 docker-compose.goim.yml 里的 consumer 服务用 ../monolith 作为 build context 单独构建。
+
+FROM alpine:3.20
+WORKDIR /app
+COPY --from=build /out/ /app/
+COPY web/ /app/web/

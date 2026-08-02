@@ -1,0 +1,77 @@
+# goim 式微服务全链路编排（Comet/Logic/Job + Kafka + ClickHouse + registry + nginx）。
+# 与 ../monolith/docker-compose.yml 并存互不干扰；在本目录执行：
+#   docker compose -f docker-compose.goim.yml up -d --build
+services:
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:CONTROLLER
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_NUM_PARTITIONS=10
+    networks: [danmu]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    networks: [danmu]
+
+  registry:
+    build: { context: ., dockerfile: Dockerfile.goim }
+    command: ["/app/registry", "-addr=:7350"]
+    networks: [danmu]
+
+  logic:
+    build: { context: ., dockerfile: Dockerfile.goim }
+    command: ["/app/logic", "-addr=:7400", "-id=logic1", "-registry=http://registry:7350", "-advertise=logic:7400", "-kafka=kafka:9092"]
+    depends_on: [kafka, registry]
+    networks: [danmu]
+
+  job:
+    build: { context: ., dockerfile: Dockerfile.goim }
+    command: ["/app/job", "-kafka=kafka:9092", "-registry=http://registry:7350"]
+    depends_on: [kafka, registry]
+    networks: [danmu]
+
+  comet1:
+    build: { context: ., dockerfile: Dockerfile.goim }
+    working_dir: /app
+    command: ["/app/comet", "-ws-addr=:8080", "-rpc-addr=:7500", "-advertise=comet1:7500", "-id=comet1", "-registry=http://registry:7350"]
+    environment: ["DANMU_AUTH_TOKEN=${DANMU_AUTH_TOKEN:-danmu-secret-token}"]
+    ports: ["8080:8080"]
+    depends_on: [registry]
+    networks: [danmu]
+
+  comet2:
+    build: { context: ., dockerfile: Dockerfile.goim }
+    working_dir: /app
+    command: ["/app/comet", "-ws-addr=:8080", "-rpc-addr=:7500", "-advertise=comet2:7500", "-id=comet2", "-registry=http://registry:7350"]
+    environment: ["DANMU_AUTH_TOKEN=${DANMU_AUTH_TOKEN:-danmu-secret-token}"]
+    ports: ["8081:8080"]
+    depends_on: [registry]
+    networks: [danmu]
+
+  # 落库 consumer 是架构无关的公共组件，源码在 ../monolith，直接以其为 build context
+  consumer:
+    build: { context: ../monolith, dockerfile: Dockerfile.consumer }
+    command: ["./consumer", "-kafka=kafka:9092", "-topic=danmu-broadcast", "-clickhouse-addr=clickhouse:9000", "-mode=storage"]
+    depends_on: [kafka, clickhouse]
+    networks: [danmu]
+
+  nginx:
+    image: nginx:alpine
+    ports: ["8088:80"]
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+    depends_on: [comet1, comet2]
+    networks: [danmu]
+
+networks:
+  danmu: { driver: bridge }
