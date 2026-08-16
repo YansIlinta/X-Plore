@@ -1,7 +1,14 @@
-*.exe
-*.db
-*.sqlite
-bin/
+# secrets
 .env
-danmu_history.db
-*.log
+.env.*
+!.env.example
+
+# build artifacts
+*.exe
+**/bin/
+bin-linux/
+wavehub/web-app/dist/
+danmu/*/logs/
+
+# deps
+node_modules/

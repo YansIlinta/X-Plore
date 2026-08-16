@@ -1,0 +1,12 @@
+# buf v2 工作区:api 为业务契约模块,third_party 提供 google/api 注解。
+# 生成:buf generate(见 buf.gen.yaml);本机无 protoc,用 buf + 既有 protoc-gen-* 插件。
+version: v2
+modules:
+  - path: api
+  - path: third_party
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

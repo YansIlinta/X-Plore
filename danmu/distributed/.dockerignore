@@ -1,0 +1,5 @@
+# Docker 构建上下文瘦身：node_modules 在镜像内 npm ci 重建，bin/ 是本地产物
+ops/web/node_modules
+ops/web/dist
+bin
+.git

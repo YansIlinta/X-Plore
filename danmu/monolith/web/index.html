@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>弹幕系统</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+
+.header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid #0f3460; }
+.header label { font-size: 13px; color: #a0a0b0; }
+.header input { background: #0f3460; border: 1px solid #533483; color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 120px; }
+.header button { background: #533483; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.header button:hover { background: #6a42a0; }
+.header button.disconnect { background: #e94560; }
+
+.status-bar { background: #0f3460; padding: 8px 20px; font-size: 12px; color: #a0a0b0; display: flex; gap: 20px; }
+.status-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.dot.connected { background: #4ecca3; }
+.dot.disconnected { background: #e94560; }
+
+/* 虚拟滚动：.messages 是滚动视口，#messagesSpacer 撑出与总行数等高的滚动条，
+   #messagesViewport 用 top 偏移只渲染可视区域（+上下 overscan）内的行，DOM 节点数
+   与消息总数无关，避免大量弹幕堆积时的 DOM 操作卡顿 */
+.messages { flex: 1; overflow-y: auto; padding: 0 20px; position: relative; }
+#messagesSpacer { position: relative; }
+#messagesViewport { position: absolute; left: 0; right: 0; }
+.msg { height: 24px; line-height: 24px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
+.msg .uid { color: #4ecca3; font-weight: 600; margin-right: 8px; }
+.msg .time { color: #666; font-size: 11px; margin-right: 8px; }
+.msg .content { color: #ddd; }
+.msg.system { color: #e94560; font-style: italic; }
+
+.input-bar { background: #16213e; padding: 12px 20px; display: flex; gap: 10px; border-top: 1px solid #0f3460; }
+.input-bar input { flex: 1; background: #0f3460; border: 1px solid #533483; color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 14px; }
+.input-bar button { background: #533483; color: #fff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.input-bar button:hover { background: #6a42a0; }
+.input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <label>房间ID <input id="roomInput" value="room-1" /></label>
+  <label>用户ID <input id="uidInput" value="" /></label>
+  <label>Token <input id="tokenInput" value="danmu-secret-token" type="password" /></label>
+  <button id="connectBtn" onclick="toggleConnect()">连接</button>
+</div>
+
+<div class="status-bar">
+  <span><span class="dot disconnected" id="statusDot"></span><span id="statusText">未连接</span></span>
+  <span>在线人数: <span id="onlineCount">-</span></span>
+  <span>房间: <span id="roomName">-</span></span>
+</div>
+
+<div class="messages" id="messages"></div>
+
+<div class="input-bar">
+  <input id="msgInput" placeholder="输入弹幕内容..." disabled onkeydown="if(event.key==='Enter')sendMsg()" />
+  <button id="sendBtn" onclick="sendMsg()" disabled>发送</button>
+</div>
+
+<script>
+let ws = null;
+let connected = false;
+let pollTimer = null;
+let sessionRefreshTimer = null;
+let sessionExpiresAt = null;
+
+// 消息去重滑动窗口：Redis Pub/Sub 和 Kafka 广播消费者双路径都可能触达客户端，
+// 用 msg_id 去重，避免同一条弹幕重复渲染。定长队列保证内存不无限增长。
+const seenMsgIds = new Set();
+const seenMsgIdQueue = [];
+const MAX_SEEN_MSG_IDS = 2000;
+
+function isDuplicateMsg(msgId) {
+  if (!msgId) return false; // 没有 msg_id（如系统消息）不参与去重
+  if (seenMsgIds.has(msgId)) return true;
+  seenMsgIds.add(msgId);
+  seenMsgIdQueue.push(msgId);
+  if (seenMsgIdQueue.length > MAX_SEEN_MSG_IDS) {
+    seenMsgIds.delete(seenMsgIdQueue.shift());
+  }
+  return false;
+}
+
+// 自动生成 uid
+if (!document.getElementById('uidInput').value) {
+  document.getElementById('uidInput').value = 'user-' + Math.floor(Math.random() * 100000);
+}
+
+initVirtualList();
+
+function getWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = location.host || 'localhost:8080';
+  const room = document.getElementById('roomInput').value.trim();
+  const uid = document.getElementById('uidInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  return `${proto}//${host}/ws?uid=${encodeURIComponent(uid)}&room=${encodeURIComponent(room)}&token=${encodeURIComponent(token)}`;
+}
+
+function toggleConnect() {
+  if (connected) {
+    disconnect();
+  } else {
+    connect();
+  }
+}
+
+function connect() {
+  if (ws) ws.close();
+
+  const url = getWsUrl();
+  addSystemMsg('正在连接...');
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    connected = true;
+    document.getElementById('statusDot').className = 'dot connected';
+    document.getElementById('statusText').textContent = '已连接';
+    document.getElementById('connectBtn').textContent = '断开';
+    document.getElementById('connectBtn').className = 'disconnect';
+    document.getElementById('msgInput').disabled = false;
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('roomName').textContent = document.getElementById('roomInput').value;
+    addSystemMsg('连接成功');
+    startPolling();
+  };
+
+  ws.onmessage = (evt) => {
+    let msgs;
+    try {
+      const data = JSON.parse(evt.data);
+      msgs = Array.isArray(data) ? data : [data];
+    } catch (e) {
+      return;
+    }
+    msgs.forEach(msg => {
+      if (msg.type === 'rate_limited') {
+        addSystemMsg('发送速率超限，消息被丢弃');
+        return;
+      }
+      if (msg.type === 'session_token') {
+        handleSessionToken(msg);
+        return;
+      }
+      if (msg.type === 'reauth_ack') {
+        return;
+      }
+      if (isDuplicateMsg(msg.msg_id)) return;
+      addDanmu(msg);
+    });
+  };
+
+  ws.onclose = (evt) => {
+    connected = false;
+    document.getElementById('statusDot').className = 'dot disconnected';
+    document.getElementById('statusText').textContent = '已断开';
+    document.getElementById('connectBtn').textContent = '连接';
+    document.getElementById('connectBtn').className = '';
+    document.getElementById('msgInput').disabled = true;
+    document.getElementById('sendBtn').disabled = true;
+    addSystemMsg(`连接关闭 (code=${evt.code} reason=${evt.reason || 'none'})`);
+    stopPolling();
+    stopSessionRefresh();
+  };
+
+  ws.onerror = () => {
+    addSystemMsg('连接错误');
+  };
+}
+
+function disconnect() {
+  if (ws) {
+    ws.close(1000, 'user disconnect');
+    ws = null;
+  }
+}
+
+function sendMsg() {
+  const input = document.getElementById('msgInput');
+  const content = input.value.trim();
+  if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const msg = {
+    type: 'danmu',
+    content: content,
+    client_ts: Date.now()
+  };
+  ws.send(JSON.stringify(msg));
+  input.value = '';
+}
+
+// ---- 虚拟滚动消息列表 ----
+const ROW_HEIGHT = 24;       // 固定行高（px），弹幕单行显示，超长省略号截断
+const OVERSCAN = 8;          // 视口上下额外渲染的行数，减少快速滚动时的空白闪烁
+const MAX_MESSAGES = 5000;   // 内存中最多保留的消息数，超出后丢弃最旧的
+
+let messageStore = [];       // { system, text, uid, content, time }
+let autoFollow = true;       // true 时新消息到达自动滚到底部；用户手动上滚查看历史时暂停跟随
+
+function initVirtualList() {
+  const container = document.getElementById('messages');
+  container.innerHTML = '<div id="messagesSpacer"><div id="messagesViewport"></div></div>';
+  container.addEventListener('scroll', () => {
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < ROW_HEIGHT * 2;
+    autoFollow = nearBottom;
+    renderVisible();
+  });
+  window.addEventListener('resize', renderVisible);
+}
+
+function pushMessage(item) {
+  messageStore.push(item);
+
+  let removed = 0;
+  if (messageStore.length > MAX_MESSAGES) {
+    removed = messageStore.length - MAX_MESSAGES;
+    messageStore.splice(0, removed);
+  }
+
+  const container = document.getElementById('messages');
+  document.getElementById('messagesSpacer').style.height = (messageStore.length * ROW_HEIGHT) + 'px';
+
+  if (removed > 0 && !autoFollow) {
+    // 非跟随模式下裁掉队首不应导致当前视图跳动
+    container.scrollTop -= removed * ROW_HEIGHT;
+  }
+  if (autoFollow) {
+    container.scrollTop = container.scrollHeight;
+  }
+  renderVisible();
+}
+
+function renderVisible() {
+  const container = document.getElementById('messages');
+  const viewport = document.getElementById('messagesViewport');
+  if (!viewport) return;
+
+  const scrollTop = container.scrollTop;
+  const viewHeight = container.clientHeight;
+
+  let start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  let end = Math.min(messageStore.length, Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT) + OVERSCAN);
+
+  viewport.style.top = (start * ROW_HEIGHT) + 'px';
+  viewport.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    frag.appendChild(renderRow(messageStore[i]));
+  }
+  viewport.appendChild(frag);
+}
+
+function renderRow(item) {
+  const div = document.createElement('div');
+  if (item.system) {
+    div.className = 'msg system';
+    div.textContent = `[系统] ${item.text}`;
+  } else {
+    div.className = 'msg';
+    div.innerHTML = `<span class="time">${item.time}</span><span class="uid">${escHtml(item.uid || '?')}</span><span class="content">${escHtml(item.content || '')}</span>`;
+  }
+  return div;
+}
+
+function addDanmu(msg) {
+  const time = msg.server_ts ? new Date(msg.server_ts).toLocaleTimeString() : '';
+  pushMessage({ system: false, uid: msg.uid, content: msg.content, time });
+}
+
+function addSystemMsg(text) {
+  pushMessage({ system: true, text });
+}
+
+// 会话令牌续期：服务端在握手成功后下发一个限时会话令牌（session_token），
+// 客户端需在到期前调用 /api/v1/session-token 换取新令牌，再通过 WS 发 reauth
+// 消息续期，否则服务端会在到期后主动断开长连接（见 server/client.go writePump）
+function handleSessionToken(msg) {
+  sessionExpiresAt = msg.expires_at;
+  scheduleSessionRefresh();
+}
+
+function scheduleSessionRefresh() {
+  stopSessionRefresh();
+  if (!sessionExpiresAt) return;
+  // 提前到期时间的一半刷新，留出重试余量
+  const delay = Math.max(5000, (sessionExpiresAt - Date.now()) / 2);
+  sessionRefreshTimer = setTimeout(refreshSessionToken, delay);
+}
+
+function stopSessionRefresh() {
+  if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
+}
+
+function refreshSessionToken() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const room = document.getElementById('roomInput').value.trim();
+  const uid = document.getElementById('uidInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  fetch('/api/v1/session-token', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid, room_id: room }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.token || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'reauth', token: data.token }));
+      sessionExpiresAt = data.expires_at;
+      scheduleSessionRefresh();
+    })
+    .catch(() => {
+      // 刷新失败先重试一次短延迟，避免因单次网络抖动导致连接到期被断开
+      sessionRefreshTimer = setTimeout(refreshSessionToken, 5000);
+    });
+}
+
+function startPolling() {
+  stopPolling();
+  pollRoomInfo();
+  pollTimer = setInterval(pollRoomInfo, 3000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function pollRoomInfo() {
+  const room = document.getElementById('roomInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  fetch(`/api/v1/rooms/${encodeURIComponent(room)}?page=1&limit=1`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  .then(r => r.json())
+  .then(data => {
+    document.getElementById('onlineCount').textContent = data.online_count || 0;
+  })
+  .catch(() => {});
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

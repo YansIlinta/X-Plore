@@ -1,0 +1,2 @@
+# distributed 子项目忽略规则
+ops/web/*.tsbuildinfo

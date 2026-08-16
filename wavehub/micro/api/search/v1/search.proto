@@ -1,0 +1,53 @@
+// X-Plore 搜索服务契约。
+// V2 实现:PG ILIKE 读旁路(共库只读 videos 表);演进位:ES + outbox 同步,接口不变。
+syntax = "proto3";
+
+package api.search.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/YansIlinta/wavehub-micro/api/search/v1;v1";
+
+service Search {
+  // 标题/简介检索,仅返回 status=ready 稿件
+  rpc SearchVideos(SearchVideosRequest) returns (SearchVideosReply) {
+    option (google.api.http) = {get: "/v1/search/videos"};
+  }
+  // 搜索框联想:标题前缀/子串,最多 10 条
+  rpc Suggest(SuggestRequest) returns (SuggestReply) {
+    option (google.api.http) = {get: "/v1/search/suggest"};
+  }
+}
+
+message SearchVideosRequest {
+  string q = 1;
+  int32 page = 2;
+  int32 size = 3;
+  string category = 4; // 可选分区过滤
+}
+
+message SearchHit {
+  uint64 id = 1;
+  string title = 2;
+  string description = 3;
+  string category = 4;
+  uint64 user_id = 5;
+  string author = 6;
+  double duration_sec = 7;
+  int64 play_count = 8;
+  string cover_url = 9;
+  int64 created_at = 10; // unix ms
+}
+
+message SearchVideosReply {
+  repeated SearchHit list = 1;
+  int32 total = 2;
+}
+
+message SuggestRequest {
+  string q = 1;
+}
+
+message SuggestReply {
+  repeated string list = 1;
+}
