@@ -94,7 +94,7 @@ export default function Traffic() {
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={4} className="hint">暂无实例（registry 为空）。</td></tr>
+                <tr><td colSpan={4} className="hint">暂无实例（etcd 中无实例）。</td></tr>
               )}
               {rows.map((r) => (
                 <tr key={r.name}>

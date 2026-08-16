@@ -1,6 +1,6 @@
 // comet 是 goim 式架构的连接层：维持 WebSocket 长连接与房间-连接映射，
-// 上行弹幕经 gRPC 转发给 Logic（一致性哈希按 roomID 路由），并暴露 Comet.PushRoom
-// 供 Job 把消息回推后本机广播。启动时向 registry 注册 "comet" 服务供 Job 发现。
+// 上行弹幕经 gRPC 转发给 Logic（etcd 发现 + round_robin 负载均衡），并暴露
+// Comet.PushRoom 供 Job 把消息回推后本机广播。启动时向 etcd 注册 "comet" 供 Job 发现。
 package main
 
 import (
@@ -22,12 +22,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/YansIlinta/danmu-distributed/core"
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
-	"github.com/YansIlinta/danmu-distributed/registry"
 )
 
 // uplinkMsg 一条待转发给 Logic 的上行弹幕。
@@ -150,13 +151,12 @@ func (c *comet) handleUplink(m uplinkMsg) {
 		c.localBroadcast(m)
 		return
 	}
-	client, ok := c.logics.forRoom(m.roomID)
-	if !ok {
-		return // 无可用 logic，丢弃（弹幕允许丢）
+	if c.logics == nil {
+		return // 无可用 logic（etcd 未配置），丢弃（弹幕允许丢）
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	start := time.Now()
-	resp, err := client.OnMessage(ctx, &pb.OnMessageReq{
+	resp, err := c.logics.cli.OnMessage(ctx, &pb.OnMessageReq{
 		RoomId: m.roomID, Uid: m.uid, Content: m.content,
 		ClientTs: m.clientTS, ClientTsNano: m.clientTSN, SourceComet: c.id,
 		OffsetMs: m.offsetMS,
@@ -265,8 +265,7 @@ func main() {
 	advertise := flag.String("advertise", "", "对外可达的 gRPC 地址(host:port)，默认由 rpc-addr 推导")
 	advertiseHTTP := flag.String("advertise-http", "", "对外可达的 HTTP 观测地址(host:port)，默认由 advertise 主机名 + ws-addr 端口推导")
 	id := flag.String("id", "comet1", "comet instance id")
-	registryURL := flag.String("registry", "", "registry base URL；配置后注册 comet 并发现 logic")
-	logicAddrs := flag.String("logic", "", "logic gRPC 地址静态列表(逗号分隔)；留空则走 registry 发现")
+	etcdEndpoints := flag.String("etcd", "", "etcd 客户端端点(逗号分隔)，如 localhost:2379；配置后注册 comet 并发现 logic")
 	pprofAddr := flag.String("pprof", "", "pprof listen address；默认空=关闭（生产勿开，会暴露运行时信息）")
 	sessionTTL := flag.Duration("session-ttl", 10*time.Minute, "会话令牌有效期")
 	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
@@ -291,16 +290,35 @@ func main() {
 	hub := core.NewHub(*id, ctx)
 	hub.TokenIssuer = core.NewTokenIssuer(authToken)
 
-	var staticLogic []string
-	if *logicAddrs != "" {
-		staticLogic = strings.Split(*logicAddrs, ",")
+	standalone := *etcdEndpoints == ""
+
+	// etcd 客户端：既用于注册自身（comet/comet-http），也用于 logic 的发现（resolver）。
+	var etcdCli *clientv3.Client
+	if !standalone {
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(*etcdEndpoints, ","),
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			log.Fatalf("[comet] etcd client: %v", err)
+		}
+		etcdCli = cli
 	}
-	standalone := *logicAddrs == "" && *registryURL == ""
+
+	// logic 连接池：etcd resolver + round_robin（见 logicpool.go）。
+	var logics *logicPool
+	if !standalone {
+		l, err := newLogicPool(etcdCli)
+		if err != nil {
+			log.Fatalf("[comet] logic pool: %v", err)
+		}
+		logics = l
+	}
 
 	c := &comet{
 		id:         *id,
 		hub:        hub,
-		logics:     newLogicPool(*registryURL, staticLogic),
+		logics:     logics,
 		authToken:  authToken,
 		jwtSecret:  jwtSecret,
 		startTime:  time.Now(),
@@ -333,21 +351,6 @@ func main() {
 	for i := 0; i < runtime.NumCPU(); i++ {
 		go c.uplinkWorker()
 	}
-	// 定期刷新 logic 列表
-	if !standalone && *logicAddrs == "" {
-		go func() {
-			t := time.NewTicker(3 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					c.logics.refresh()
-				}
-			}
-		}()
-	}
 	c.startQPSTracker(ctx)
 
 	// gRPC server（Job → Comet.PushRoom）
@@ -364,11 +367,12 @@ func main() {
 		}
 	}()
 
-	// 注册到 registry 供 Job 发现（注册的是 gRPC 地址）
-	if *registryURL != "" {
-		go registry.KeepAlive(ctx, *registryURL, "comet", advertiseAddr(*advertise, *rpcAddr), 10*time.Second)
-		// 额外注册 comet-http（HTTP 观测地址），供 Ops Console 经 registry 发现
-		go registry.KeepAlive(ctx, *registryURL, "comet-http", advertiseHTTPAddr(*advertiseHTTP, *advertise, *wsAddr), 10*time.Second)
+	// 注册到 etcd 供 Job 发现（注册的是 gRPC 地址）；logic 的发现由 resolver 自己 watch，无需这里轮询。
+	// KeepAlive 自带重试：etcd 晚于本进程就绪也不致命（同原 registry.KeepAlive 语义）。
+	if !standalone {
+		go etcdreg.KeepAlive(ctx, etcdCli, "comet", advertiseAddr(*advertise, *rpcAddr), 10*time.Second)
+		// 额外注册 comet-http（HTTP 观测地址），供 Ops Console 经 etcd 发现
+		go etcdreg.KeepAlive(ctx, etcdCli, "comet-http", advertiseHTTPAddr(*advertiseHTTP, *advertise, *wsAddr), 10*time.Second)
 	}
 
 	// HTTP/WS server + REST admin

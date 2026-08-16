@@ -3,7 +3,7 @@ import { api, usePoll, Instance } from "../api";
 import { fmtNum, fmtRate, fmtUptime } from "../format";
 
 // Services：统一服务实例视图。可点行展开原始 stats JSON（实例详情 MVP）。
-// component 非空时只显示该组件（侧栏 Comet/Logic/Job/Registry 子页）。
+// component 非空时只显示该组件（侧栏 Comet/Logic/Job/Etcd 子页）。
 
 function statNum(it: Instance, key: string): number | null {
   const v = it.stats?.[key];
@@ -51,7 +51,7 @@ export default function Services({ component }: { component?: string }) {
   const groups = component ? data.services.filter((s) => s.name === component) : data.services;
 
   if (groups.length === 0) {
-    return <div className="hint">registry 中暂无 {component ?? "任何"} 实例。</div>;
+    return <div className="hint">etcd 中暂无 {component ?? "任何"} 实例。</div>;
   }
 
   return (

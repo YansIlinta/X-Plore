@@ -14,8 +14,7 @@ COPY go.mod go.sum ./
 RUN go mod download || true
 COPY . .
 COPY --from=web /web/dist ops/web/dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/registry ./cmd/registry/ \
- && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/logic    ./logic/ \
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/logic    ./logic/ \
  && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/job      ./job/ \
  && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/comet    ./comet/ \
  && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ops      ./cmd/ops/

@@ -4,7 +4,7 @@ import { fmtNum } from "../format";
 
 // Topology：手绘 SVG 架构图（节点数量少，不引入 graph 库）。
 // 布局按消息链路分层：clients → nginx → comet[] → logic[] → kafka → job[] →(回到 comet)，
-// registry 置于右侧，discover 边用点线。
+// etcd 置于右侧，discover 边用点线。
 
 const NODE_W = 176;
 const NODE_H = 46;
@@ -40,7 +40,7 @@ export default function Topology() {
         n.kind === "comet" ? 2 :
         n.kind === "logic" ? 3 :
         n.kind === "kafka" ? 4 :
-        n.kind === "job" ? 5 : -1; // registry 特殊位置
+        n.kind === "job" ? 5 : -1; // etcd 特殊位置
       if (row >= 0) (rows[row] ??= []).push(n);
     }
     const placed: PlacedNode[] = [];
@@ -56,9 +56,9 @@ export default function Topology() {
         });
       });
     }
-    // registry：右侧，与 logic 层对齐
+    // etcd：右侧，与 logic 层对齐
     for (const n of topo.nodes) {
-      if (n.kind === "registry") {
+      if (n.kind === "etcd") {
         placed.push({ ...n, x: CENTER_X + 330, y: 34 + 3 * ROW_GAP });
       }
     }

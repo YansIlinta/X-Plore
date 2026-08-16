@@ -1,6 +1,6 @@
 // logic 是 goim 式架构的逻辑层：接收 comet 转发来的上行弹幕，做敏感词过滤、
 // 生成全局唯一 msg_id，再 produce 到 Kafka（key=roomID，同房间进同一 partition 保序）。
-// 无状态，可按 CPU 水平扩容；comet 用一致性哈希把同房间上行路由到固定 logic 实例。
+// 无状态，可按 CPU 水平扩容；comet 经 etcd 发现 logic 并用 round_robin 分发上行。
 package main
 
 import (
@@ -15,16 +15,18 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 
 	"github.com/YansIlinta/danmu-distributed/core"
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
-	"github.com/YansIlinta/danmu-distributed/registry"
 )
 
 type logicServer struct {
@@ -100,7 +102,7 @@ func main() {
 	id := flag.String("id", "logic1", "logic instance id (用于 msg_id 前缀)")
 	kafkaBrokers := flag.String("kafka", "localhost:9092", "Kafka brokers (comma separated)")
 	kafkaTopic := flag.String("kafka-topic", "danmu-broadcast", "Kafka topic")
-	registryURL := flag.String("registry", "", "registry base URL；配置后注册 logic 服务供 comet 发现")
+	etcdEndpoints := flag.String("etcd", "", "etcd 客户端端点(逗号分隔)；配置后注册 logic 服务供 comet 发现")
 	advertise := flag.String("advertise", "", "对外可达的 gRPC 地址(host:port)，默认由 addr 推导")
 	httpAddr := flag.String("http-addr", ":7410", "HTTP 观测 listen address（/health、/api/v1/stats）")
 	advertiseHTTP := flag.String("advertise-http", "", "对外可达的 HTTP 观测地址(host:port)，默认由 advertise 主机名 + http-addr 端口推导")
@@ -194,13 +196,22 @@ func main() {
 		}
 	}()
 
-	// 注册到 registry 供 comet 一致性哈希发现
-	if *registryURL != "" {
+	// 注册到 etcd 供 comet 经 resolver 发现
+	if *etcdEndpoints != "" {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go registry.KeepAlive(ctx, *registryURL, "logic", advertiseAddr(*advertise, *addr), 10*time.Second)
-		// 额外注册 logic-http（HTTP 观测地址），供 Ops Console 经 registry 发现
-		go registry.KeepAlive(ctx, *registryURL, "logic-http", advertiseHTTPAddr(*advertiseHTTP, *advertise, *httpAddr), 10*time.Second)
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(*etcdEndpoints, ","),
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			log.Fatalf("[logic] etcd client: %v", err)
+		}
+		defer cli.Close()
+		// KeepAlive 自带重试：etcd 晚于本进程就绪也不致命（同原 registry.KeepAlive 语义）。
+		go etcdreg.KeepAlive(ctx, cli, "logic", advertiseAddr(*advertise, *addr), 10*time.Second)
+		// 额外注册 logic-http（HTTP 观测地址），供 Ops Console 经 etcd 发现
+		go etcdreg.KeepAlive(ctx, cli, "logic-http", advertiseHTTPAddr(*advertiseHTTP, *advertise, *httpAddr), 10*time.Second)
 	}
 
 	sigCh := make(chan os.Signal, 1)

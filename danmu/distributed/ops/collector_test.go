@@ -1,7 +1,9 @@
 package ops
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -63,7 +65,7 @@ func TestEvalHealth(t *testing.T) {
 	c := &Collector{cfg: Config{}} // KafkaBrokers 空：不观测 Kafka
 
 	snap := &Snapshot{
-		RegistryUp: true,
+		EtcdUp: true,
 		Services: []Service{
 			{Name: "comet", Instances: []Instance{
 				{HTTPAddr: "a:1", Healthy: true},
@@ -78,7 +80,7 @@ func TestEvalHealth(t *testing.T) {
 	}
 
 	snap = &Snapshot{
-		RegistryUp: true,
+		EtcdUp: true,
 		Services: []Service{
 			{Name: "comet", Instances: []Instance{
 				{HTTPAddr: "a:1", Healthy: false},
@@ -92,7 +94,7 @@ func TestEvalHealth(t *testing.T) {
 	}
 
 	snap = &Snapshot{
-		RegistryUp: true,
+		EtcdUp: true,
 		Services: []Service{
 			{Name: "comet", Instances: []Instance{
 				{HTTPAddr: "a:1", Healthy: false},
@@ -105,7 +107,7 @@ func TestEvalHealth(t *testing.T) {
 		t.Fatalf("all comets down: %s", snap.Health)
 	}
 
-	snap = &Snapshot{RegistryUp: false, Services: []Service{{Name: "comet"}}}
+	snap = &Snapshot{EtcdUp: false, Services: []Service{{Name: "comet"}}}
 	c.evalHealth(snap)
 	if snap.Health != healthCritical {
 		t.Fatalf("registry down: %s", snap.Health)
@@ -113,7 +115,7 @@ func TestEvalHealth(t *testing.T) {
 
 	// Kafka 启用但不可用 → critical
 	c2 := &Collector{cfg: Config{KafkaBrokers: "localhost:9092"}}
-	snap = &Snapshot{RegistryUp: true, Kafka: KafkaInfo{Available: false},
+	snap = &Snapshot{EtcdUp: true, Kafka: KafkaInfo{Available: false},
 		Services: []Service{{Name: "comet", Instances: []Instance{{HTTPAddr: "a:1", Healthy: true}}}}}
 	c2.evalHealth(snap)
 	if snap.Health != healthCritical {
@@ -122,7 +124,7 @@ func TestEvalHealth(t *testing.T) {
 
 	// 空部署：registry 活但无 comet → degraded
 	c3 := &Collector{cfg: Config{}}
-	snap = &Snapshot{RegistryUp: true}
+	snap = &Snapshot{EtcdUp: true}
 	c3.evalHealth(snap)
 	if snap.Health != healthDegraded {
 		t.Fatalf("empty deploy: %s", snap.Health)
@@ -160,5 +162,120 @@ func TestCometRates(t *testing.T) {
 	in, out = c.cometRates(addr)
 	if in != nil || out != nil {
 		t.Fatalf("counter reset: in=%v out=%v, want nil", in, out)
+	}
+}
+
+// pollOnce：注入的 Discover 结果 → probeServices → Services；实例探测走真实 HTTP 端点。
+func TestPollOnceUsesEtcdDiscovery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/stats":
+			_, _ = w.Write([]byte(`{"server_id":"comet1"}`))
+		default: // /metrics
+			_, _ = w.Write([]byte(`danmu_messages_total{direction="in"} 0`))
+		}
+	}))
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+
+	c := NewCollector(Config{
+		Discover: func(ctx context.Context) (map[string][]string, error) {
+			return map[string][]string{
+				"comet":      {addr},
+				"comet-http": {addr},
+			}, nil
+		},
+	})
+	c.pollOnce(true)
+
+	snap := c.Snapshot()
+	if !snap.EtcdUp {
+		t.Fatalf("etcd_up=false, detail=%v", snap.HealthDetail)
+	}
+	if len(snap.Services) != 1 || snap.Services[0].Name != "comet" {
+		t.Fatalf("services=%+v", snap.Services)
+	}
+	insts := snap.Services[0].Instances
+	if len(insts) != 1 || !insts[0].Healthy || insts[0].RPCAddr != addr {
+		t.Fatalf("instances=%+v", insts)
+	}
+}
+
+// etcd 掉线：沿用上一轮已知实例清单继续探测，且 EtcdUp=false 判 critical。
+func TestPollOnceEtcdDownKeepsLastServices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/stats":
+			_, _ = w.Write([]byte(`{"server_id":"comet1"}`))
+		}
+	}))
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+
+	up := true
+	c := NewCollector(Config{
+		Discover: func(ctx context.Context) (map[string][]string, error) {
+			if !up {
+				return nil, fmt.Errorf("etcd down")
+			}
+			return map[string][]string{"comet-http": {addr}}, nil
+		},
+	})
+	c.pollOnce(true)
+	up = false
+	c.pollOnce(false)
+
+	snap := c.Snapshot()
+	if snap.EtcdUp {
+		t.Fatalf("etcd_up=true, want false")
+	}
+	if snap.Health != healthCritical {
+		t.Fatalf("health=%s, want critical", snap.Health)
+	}
+	if len(snap.Services) != 1 || !snap.Services[0].Instances[0].Healthy {
+		t.Fatalf("etcd 掉线后应沿用上一轮清单: %+v", snap.Services)
+	}
+}
+
+// probeServices：同组件多实例只产出一个 Service 分组。
+// 回归：去重循环曾误读空 map，≥2 实例时组件整组重复（compose 恰好 2 台 comet，必触发）。
+func TestProbeServicesOneGroupPerComponent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/stats":
+			_, _ = w.Write([]byte(`{"server_id":"x"}`))
+		default: // /metrics
+			_, _ = w.Write([]byte(`danmu_messages_total{direction="in"} 0`))
+		}
+	}))
+	defer srv.Close()
+	a := srv.Listener.Addr().String()
+
+	c := NewCollector(Config{
+		Discover: func(ctx context.Context) (map[string][]string, error) { return nil, nil },
+	})
+	svcs := c.probeServices(map[string][]string{
+		"comet":      {a, a},
+		"comet-http": {a, a},
+		"logic":      {a, a},
+		"logic-http": {a, a},
+	})
+
+	names := []string{}
+	for _, s := range svcs {
+		names = append(names, s.Name)
+	}
+	if len(svcs) != 2 || names[0] != "comet" || names[1] != "logic" {
+		t.Fatalf("services=%v, want [comet logic]", names)
+	}
+	if len(svcs[0].Instances) != 2 || len(svcs[1].Instances) != 2 {
+		t.Fatalf("instances: comet=%d logic=%d, want 2/2",
+			len(svcs[0].Instances), len(svcs[1].Instances))
 	}
 }

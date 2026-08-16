@@ -145,10 +145,10 @@ func (a *API) handleTopology(w http.ResponseWriter, r *http.Request) {
 
 	// 固定拓扑边：nginx→comet、comet→logic、logic→kafka、kafka→job、job→comet
 	kafkaHealthy := boolPtr(snap.Kafka.Available)
-	registryHealthy := boolPtr(snap.RegistryUp)
+	etcdHealthy := boolPtr(snap.EtcdUp)
 	nodes = append(nodes,
 		node("kafka", "kafka", "Kafka", kafkaHealthy),
-		node("registry", "registry", "Registry :7350", registryHealthy),
+		node("etcd", "etcd", "etcd :2379", etcdHealthy),
 	)
 	for _, cid := range cometIDs {
 		edges = append(edges, map[string]string{"from": "nginx", "to": cid, "kind": "ws"})
@@ -167,15 +167,15 @@ func (a *API) handleTopology(w http.ResponseWriter, r *http.Request) {
 			edges = append(edges, map[string]string{"from": jid, "to": cid, "kind": "rpc"})
 		}
 	}
-	// registry 与服务发现关系（虚线，前端按 kind 区分）
+	// etcd 与服务发现/注册关系（虚线，前端按 kind 区分）
 	for _, cid := range cometIDs {
-		edges = append(edges, map[string]string{"from": "registry", "to": cid, "kind": "discover"})
+		edges = append(edges, map[string]string{"from": "etcd", "to": cid, "kind": "discover"})
 	}
 	for _, lid := range logicIDs {
-		edges = append(edges, map[string]string{"from": "registry", "to": lid, "kind": "discover"})
+		edges = append(edges, map[string]string{"from": "etcd", "to": lid, "kind": "discover"})
 	}
 	for _, jid := range jobIDs {
-		edges = append(edges, map[string]string{"from": "registry", "to": jid, "kind": "discover"})
+		edges = append(edges, map[string]string{"from": "etcd", "to": jid, "kind": "discover"})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

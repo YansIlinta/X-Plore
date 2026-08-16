@@ -41,7 +41,7 @@ func (c *Collector) mockOnce(start time.Time) {
 	snap := Snapshot{
 		Mock:         true,
 		TS:           now,
-		RegistryUp:   true,
+		EtcdUp:       true,
 		Health:       healthHealthy,
 		HealthDetail: []string{"mock 模式：所有数值为演示数据，不代表真实系统"},
 		Services: []Service{

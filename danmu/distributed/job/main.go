@@ -1,4 +1,4 @@
-// job 是 goim 式架构的扇出层：消费 Kafka，从 registry 发现所有 comet，按房间把
+// job 是 goim 式架构的扇出层：消费 Kafka，从 etcd 发现所有 comet，按房间把
 // 消息定向 PushRoom 推给每个 comet（comet 本地无该房间即丢弃）。这替代了原单体
 // 的 Redis Pub/Sub 跨机广播——Redis Cluster Pub/Sub 每条 publish 广播到每个节点、
 // 吞吐随集群规模负向扩展；Kafka→Job→定向 push 是 goim 的做法，扇出与削峰解耦。
@@ -23,13 +23,14 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/YansIlinta/danmu-distributed/core"
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
-	"github.com/YansIlinta/danmu-distributed/registry"
 )
 
 const flushWindow = 10 * time.Millisecond
@@ -46,29 +47,23 @@ var (
 	statDelivered atomic.Int64 // PushRoomResp.delivered 累计投递数
 )
 
-// cometPool 维护到各 comet 的 gRPC 连接，按 registry 定期刷新。
+// cometPool 维护到各 comet 的 gRPC 连接。地址集合来自 etcd watch
+// （etcdreg.Watch 在 main 里启动），每次变化都调 apply 重建连接池。
 type cometPool struct {
-	registryURL string
-	mu          sync.RWMutex
-	conns       map[string]*grpc.ClientConn // addr -> conn
-	clients     map[string]pb.CometServiceClient
+	mu      sync.RWMutex
+	conns   map[string]*grpc.ClientConn // addr -> conn
+	clients map[string]pb.CometServiceClient
 }
 
-func newCometPool(registryURL string) *cometPool {
+func newCometPool() *cometPool {
 	return &cometPool{
-		registryURL: registryURL,
-		conns:       make(map[string]*grpc.ClientConn),
-		clients:     make(map[string]pb.CometServiceClient),
+		conns:   make(map[string]*grpc.ClientConn),
+		clients: make(map[string]pb.CometServiceClient),
 	}
 }
 
-// refresh 从 registry 拉取存活 comet 列表，新增拨号、消失关闭。
-func (p *cometPool) refresh() {
-	addrs, err := fetchService(p.registryURL, "comet")
-	if err != nil {
-		log.Printf("[job] registry fetch error: %v", err)
-		return
-	}
+// apply 按最新存活地址列表新增拨号、关闭消失的连接。
+func (p *cometPool) apply(addrs []string) {
 	alive := make(map[string]bool, len(addrs))
 	for _, a := range addrs {
 		alive[a] = true
@@ -165,7 +160,7 @@ func (p *cometPool) addrs() []string {
 func main() {
 	kafkaBrokers := flag.String("kafka", "localhost:9092", "Kafka brokers (comma separated)")
 	kafkaTopic := flag.String("kafka-topic", "danmu-broadcast", "Kafka topic")
-	registryURL := flag.String("registry", "http://localhost:7350", "registry base URL")
+	etcdEndpoints := flag.String("etcd", "localhost:2379", "etcd 客户端端点(逗号分隔)")
 	httpAddr := flag.String("http-addr", ":7420", "HTTP 观测 listen address（/health、/api/v1/stats）")
 	advertiseHTTP := flag.String("advertise-http", "", "对外可达的 HTTP 观测地址(host:port)，默认 localhost + http-addr 端口")
 	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
@@ -179,20 +174,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool := newCometPool(*registryURL)
-	pool.refresh()
-	go func() {
-		t := time.NewTicker(3 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				pool.refresh()
-			}
-		}
-	}()
+	pool := newCometPool()
+	// comet 地址集合由 etcd watch 驱动：增删即重建连接池，无需轮询。
+	etcdCli, err := clientv3.New(clientv3.Config{
+		Endpoints:   strings.Split(*etcdEndpoints, ","),
+		DialTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("[job] etcd client: %v", err)
+	}
+	defer etcdCli.Close()
+	go etcdreg.Watch(ctx, etcdCli, "comet", pool.apply)
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        splitComma(*kafkaBrokers),
@@ -243,17 +235,16 @@ func main() {
 		}
 	}()
 
-	// 注册 job-http（HTTP 观测地址），供 Ops Console 经 registry 发现。
+	// 注册 job-http（HTTP 观测地址），供 Ops Console 经 etcd 发现。
 	// job 的 RPC 面是「主动调用方」，原本不注册；这里只为观测发现注册 HTTP 地址。
-	if *registryURL != "" {
-		go registryKeepAlive(ctx, *registryURL, "job-http", advertiseHTTPAddr(*advertiseHTTP, *httpAddr))
-	}
+	// KeepAlive 自带重试：etcd 晚于本进程就绪也不致命（同原 registry.KeepAlive 语义）。
+	go etcdreg.KeepAlive(ctx, etcdCli, "job-http", advertiseHTTPAddr(*advertiseHTTP, *httpAddr), 10*time.Second)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() { <-sigCh; log.Println("[job] shutdown"); cancel() }()
 
-	log.Printf("[job] consuming %s, registry=%s", *kafkaTopic, *registryURL)
+	log.Printf("[job] consuming %s, etcd=%s", *kafkaTopic, *etcdEndpoints)
 
 	// 按房间聚合一个 flushWindow 的消息再推，减少 RPC 次数（对齐单体的 worker 批聚合）。
 	roomBatch := make(map[string]*batch)
@@ -362,23 +353,6 @@ func buildArray(values [][]byte) []byte {
 	return buf.Bytes()
 }
 
-// httpClient 带超时：registry 不可达时 refresh 必须在几秒内失败返回，
-// 否则 3s 一次的 refresh tick 会堆积卡死的 goroutine。
-var httpClient = &http.Client{Timeout: 5 * time.Second}
-
-func fetchService(registryURL, service string) ([]string, error) {
-	resp, err := httpClient.Get(registryURL + "/services?service=" + service)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var addrs []string
-	if err := json.NewDecoder(resp.Body).Decode(&addrs); err != nil {
-		return nil, err
-	}
-	return addrs, nil
-}
-
 func splitComma(s string) []string {
 	var out []string
 	start := 0
@@ -389,11 +363,6 @@ func splitComma(s string) []string {
 		}
 	}
 	return append(out, s[start:])
-}
-
-// registryKeepAlive 简化包装：隐藏 ttl 细节，统一 10s 租约。
-func registryKeepAlive(ctx context.Context, registryURL, service, addr string) {
-	registry.KeepAlive(ctx, registryURL, service, addr, 10*time.Second)
 }
 
 // advertiseHTTPAddr 推导 HTTP 观测地址：显式 advertise-http 优先，否则 localhost + 端口。

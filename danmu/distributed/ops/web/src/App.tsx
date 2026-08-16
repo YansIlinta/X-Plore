@@ -12,7 +12,7 @@ const PAGES: { path: string; label: string; indent?: boolean }[] = [
   { path: "services/comet", label: "Comet", indent: true },
   { path: "services/logic", label: "Logic", indent: true },
   { path: "services/job", label: "Job", indent: true },
-  { path: "services/registry", label: "Registry", indent: true },
+  { path: "services/etcd", label: "Etcd", indent: true },
 ];
 
 function useHashRoute(): string {

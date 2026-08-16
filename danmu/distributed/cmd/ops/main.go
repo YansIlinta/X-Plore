@@ -1,5 +1,5 @@
 // ops 是 Danmu Ops Console 的后端：旁路观测服务，只做 read + aggregate。
-// 数据源：registry（服务发现）→ 各服务 *-http 观测端点（/health、/api/v1/stats、
+// 数据源：etcd（服务发现）→ 各服务 *-http 观测端点（/health、/api/v1/stats、
 // comet /metrics）→ Kafka consumer lag。它不参与消息链路，挂掉不影响弹幕系统。
 package main
 
@@ -20,7 +20,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":7900", "Ops Console HTTP listen address")
-	registryURL := flag.String("registry", "http://localhost:7350", "registry base URL")
+	etcdEndpoints := flag.String("etcd", "localhost:2379", "etcd 客户端端点(逗号分隔)")
 	token := flag.String("token", "", "comet 观测 API 的 Bearer token（默认取 env DANMU_AUTH_TOKEN，再默认 danmu-secret-token）")
 	kafkaBrokers := flag.String("kafka", "localhost:9092", "Kafka brokers（逗号分隔）；空字符串=不观测 Kafka")
 	kafkaTopic := flag.String("kafka-topic", "danmu-broadcast", "广播 Kafka topic")
@@ -38,13 +38,13 @@ func main() {
 	}
 
 	col := ops.NewCollector(ops.Config{
-		RegistryURL:  *registryURL,
-		Token:        *token,
-		KafkaBrokers: *kafkaBrokers,
-		KafkaTopic:   *kafkaTopic,
-		KafkaGroups:  []string{"danmu-job", "danmu-storage"},
-		Poll:         *poll,
-		Mock:         *mock,
+		EtcdEndpoints: strings.Split(*etcdEndpoints, ","),
+		Token:         *token,
+		KafkaBrokers:  *kafkaBrokers,
+		KafkaTopic:    *kafkaTopic,
+		KafkaGroups:   []string{"danmu-job", "danmu-storage"},
+		Poll:          *poll,
+		Mock:          *mock,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -82,7 +82,7 @@ func main() {
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
 	go func() {
-		log.Printf("[ops] listening on %s (registry=%s, kafka=%q, mock=%v)", *addr, *registryURL, *kafkaBrokers, *mock)
+		log.Printf("[ops] listening on %s (etcd=%s, kafka=%q, mock=%v)", *addr, *etcdEndpoints, *kafkaBrokers, *mock)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[ops] serve: %v", err)
 		}

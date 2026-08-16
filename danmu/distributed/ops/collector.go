@@ -1,4 +1,4 @@
-// Package ops 实现 Danmu Ops Console 的后端数据面：轮询 registry 发现实例，
+// Package ops 实现 Danmu Ops Console 的后端数据面：查询 etcd 发现实例，
 // 并发抓取各实例的观测端点，聚合出 overview / services / topology / events。
 // 它是纯旁路观测者：只读 + 聚合，不参与消息链路，自身挂掉不影响弹幕系统。
 //
@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 )
 
 const (
@@ -37,7 +40,9 @@ const (
 
 // Config 是 Collector 的构造参数（由 cmd/ops 的 flags 映射而来）。
 type Config struct {
-	RegistryURL  string        // registry base URL（如 http://localhost:7350）
+	EtcdEndpoints []string // etcd 客户端端点（如 localhost:2379）
+	// Discover 是服务发现函数（测试注入用）；nil 时默认用 EtcdEndpoints 建 etcd 客户端。
+	Discover     func(ctx context.Context) (map[string][]string, error)
 	Token        string        // comet /api/v1/stats 的 Bearer token（DANMU_AUTH_TOKEN）
 	KafkaBrokers string        // 逗号分隔；空字符串 = 不观测 Kafka
 	KafkaTopic   string        // 广播 topic，默认 danmu-broadcast
@@ -49,7 +54,7 @@ type Config struct {
 // Instance 是单个服务实例的观测快照。
 type Instance struct {
 	HTTPAddr   string             `json:"http_addr"`
-	RPCAddr    string             `json:"rpc_addr,omitempty"` // 对应 RPC 地址（若能从 registry 对上）
+	RPCAddr    string             `json:"rpc_addr,omitempty"` // 对应 RPC 地址（若能从 etcd 对上）
 	Healthy    bool               `json:"healthy"`
 	Err        string             `json:"err,omitempty"`   // 探测失败原因
 	MsgInRate  *float64           `json:"msg_in_rate"`     // 上行 msg/s（仅 comet，null=暂无）
@@ -79,7 +84,7 @@ type KafkaInfo struct {
 type Snapshot struct {
 	Mock         bool      `json:"mock"`
 	TS           time.Time `json:"ts"`
-	RegistryUp   bool      `json:"registry_up"`
+	EtcdUp       bool      `json:"etcd_up"`
 	Health       string    `json:"health"`
 	HealthDetail []string  `json:"health_detail"`
 	Services     []Service `json:"services"`
@@ -90,7 +95,7 @@ type Snapshot struct {
 type Event struct {
 	TS      time.Time `json:"ts"`
 	Level   string    `json:"level"` // INFO | WARNING | ERROR
-	Kind    string    `json:"kind"`  // instance | registry | health | kafka | loadtest
+	Kind    string    `json:"kind"`  // instance | etcd | health | kafka | loadtest
 	Message string    `json:"message"`
 }
 
@@ -134,6 +139,7 @@ type counterSample struct {
 type Collector struct {
 	cfg        Config
 	httpClient *http.Client
+	discover   func(ctx context.Context) (map[string][]string, error)
 	events     eventBuffer
 
 	traces *traceStore // 跨服务 trace 汇聚（自带锁）
@@ -144,12 +150,12 @@ type Collector struct {
 	prevStats   map[string]map[string]float64
 	prevStatsTS map[string]time.Time
 	kafka       KafkaInfo
-	lastService map[string][]string // 上一轮 registry 全量结果（registry 掉线时留用）
+	lastService map[string][]string // 上一轮 etcd 全量结果（etcd 掉线时留用）
 }
 
 // NewCollector 构造采集器。httpClient 超时 2s：任何实例慢都不能拖垮采集循环。
 func NewCollector(cfg Config) *Collector {
-	return &Collector{
+	c := &Collector{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout:   2 * time.Second,
@@ -161,6 +167,23 @@ func NewCollector(cfg Config) *Collector {
 		kafka:       KafkaInfo{Available: false, Lag: map[string]*int64{}},
 		traces:      newTraceStore(),
 	}
+	if cfg.Discover != nil {
+		c.discover = cfg.Discover
+	} else {
+		etcdCli, err := clientv3.New(clientv3.Config{
+			Endpoints:   cfg.EtcdEndpoints,
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			log.Printf("[ops] etcd client: %v", err)
+			c.discover = func(context.Context) (map[string][]string, error) { return nil, err }
+		} else {
+			c.discover = func(ctx context.Context) (map[string][]string, error) {
+				return etcdreg.ListAll(ctx, etcdCli)
+			}
+		}
+	}
+	return c
 }
 
 // Run 启动采集循环与 Kafka lag 循环，直到 ctx 取消。mock 模式走独立分支。
@@ -190,7 +213,7 @@ func (c *Collector) Snapshot() Snapshot {
 // Events 返回最近 n 条事件。
 func (c *Collector) Events(n int) []Event { return c.events.Recent(n) }
 
-// pollLoop 主采集循环：registry → 实例探测 → 聚合 → 事件 diff。
+// pollLoop 主采集循环：etcd → 实例探测 → 聚合 → 事件 diff。
 func (c *Collector) pollLoop(ctx context.Context) {
 	c.pollOnce(true) // 启动先采一轮，避免 API 冷启动全是 null
 	t := time.NewTicker(c.cfg.Poll)
@@ -210,11 +233,11 @@ func (c *Collector) pollOnce(first bool) {
 	prevSnap := c.snap
 	c.mu.RUnlock()
 
-	all, regErr := c.fetchRegistry()
+	all, regErr := c.listServices()
 	snap := Snapshot{
-		Mock:       false,
-		TS:         time.Now(),
-		RegistryUp: regErr == nil,
+		Mock:   false,
+		TS:     time.Now(),
+		EtcdUp: regErr == nil,
 	}
 
 	if regErr == nil {
@@ -223,9 +246,9 @@ func (c *Collector) pollOnce(first bool) {
 		c.mu.Unlock()
 	} else {
 		c.mu.RLock()
-		all = c.lastService // registry 掉线：用上次已知实例清单继续探测
+		all = c.lastService // etcd 掉线：用上次已知实例清单继续探测
 		c.mu.RUnlock()
-		log.Printf("[ops] registry fetch: %v", regErr)
+		log.Printf("[ops] etcd fetch: %v", regErr)
 	}
 
 	snap.Services = c.probeServices(all)
@@ -272,27 +295,11 @@ func (c *Collector) pollOnce(first bool) {
 	c.mu.Unlock()
 }
 
-// fetchRegistry GET registry /services（无参 → 全部服务 map）。
-func (c *Collector) fetchRegistry() (map[string][]string, error) {
+// listServices 从 etcd 读全部服务存活地址（对应原 registry GET /services 无参）。
+func (c *Collector) listServices() (map[string][]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.RegistryURL+"/services", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("registry status %d", resp.StatusCode)
-	}
-	var all map[string][]string
-	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
-		return nil, err
-	}
-	return all, nil
+	return c.discover(ctx)
 }
 
 // probeTarget 是一次实例探测的目标。
@@ -340,8 +347,10 @@ func (c *Collector) probeServices(all map[string][]string) []Service {
 
 	byComp := make(map[string][]Instance)
 	var order []string
+	seen := make(map[string]bool)
 	for _, tg := range targets {
-		if _, ok := byComp[tg.component]; !ok {
+		if !seen[tg.component] {
+			seen[tg.component] = true
 			order = append(order, tg.component)
 		}
 	}
@@ -531,16 +540,16 @@ func (c *Collector) cometRates(httpAddr string) (*float64, *float64) {
 	return &inRate, &outRate
 }
 
-// evalHealth 根据 registry / 各组件实例 / Kafka 的真实状态判定系统健康。
-// 规则：registry 不可达或所有 comet 不可达或 Kafka（启用观测时）不可用 → critical；
+// evalHealth 根据 etcd / 各组件实例 / Kafka 的真实状态判定系统健康。
+// 规则：etcd 不可达或所有 comet 不可达或 Kafka（启用观测时）不可用 → critical；
 // 任一实例不可达 → degraded；否则 healthy。
 func (c *Collector) evalHealth(snap *Snapshot) {
 	var detail []string
 	health := healthHealthy
 
-	if !snap.RegistryUp {
+	if !snap.EtcdUp {
 		health = healthCritical
-		detail = append(detail, "registry 不可达：服务发现失效")
+		detail = append(detail, "etcd 不可达：服务发现失效")
 	}
 
 	var cometTotal, cometHealthy int
@@ -568,9 +577,9 @@ func (c *Collector) evalHealth(snap *Snapshot) {
 		health = healthDegraded
 		detail = append(detail, degradedComp...)
 	}
-	if cometTotal == 0 && snap.RegistryUp {
+	if cometTotal == 0 && snap.EtcdUp {
 		health = healthDegraded
-		detail = append(detail, "registry 中没有 comet 实例注册")
+		detail = append(detail, "etcd 中没有 comet 实例注册")
 	}
 	if c.cfg.KafkaBrokers != "" && !snap.Kafka.Available {
 		health = healthCritical
@@ -583,7 +592,7 @@ func (c *Collector) evalHealth(snap *Snapshot) {
 	snap.HealthDetail = detail
 }
 
-// diffEvents 对比前后两轮快照，产出实例出现/消失、registry 恢复/掉线、健康状态翻转事件。
+// diffEvents 对比前后两轮快照，产出实例出现/消失、etcd 恢复/掉线、健康状态翻转事件。
 func (c *Collector) diffEvents(prev, cur Snapshot, regErr error) {
 	prevInsts := map[string]bool{}
 	curInsts := map[string]bool{}
@@ -613,10 +622,10 @@ func (c *Collector) diffEvents(prev, cur Snapshot, regErr error) {
 		}
 	}
 
-	if !prev.RegistryUp && cur.RegistryUp {
-		c.events.Add(Event{TS: cur.TS, Level: eventInfo, Kind: "registry", Message: "registry recovered"})
-	} else if prev.RegistryUp && !cur.RegistryUp {
-		c.events.Add(Event{TS: cur.TS, Level: eventError, Kind: "registry", Message: "registry unreachable"})
+	if !prev.EtcdUp && cur.EtcdUp {
+		c.events.Add(Event{TS: cur.TS, Level: eventInfo, Kind: "etcd", Message: "etcd recovered"})
+	} else if prev.EtcdUp && !cur.EtcdUp {
+		c.events.Add(Event{TS: cur.TS, Level: eventError, Kind: "etcd", Message: "etcd unreachable"})
 	}
 
 	if prev.Health != cur.Health && prev.TS != cur.TS {

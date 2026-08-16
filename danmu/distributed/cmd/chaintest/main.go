@@ -1,15 +1,15 @@
 // chaintest 是 goim 链路的客户端侧集成验证（不依赖 Kafka）：
-//  1. registry 服务发现：comet 已注册，能查到其 gRPC 地址
+//  1. etcd 服务发现：comet 已注册，能查到其 gRPC 地址
 //  2. Logic.OnMessage：敏感词过滤 + 生成 msg_id（直连 logic gRPC）
 //  3. Job→Comet.PushRoom→WS：模拟 job 调 comet.PushRoom，验证 WS 客户端收到广播
 //  4. 上行：WS 发弹幕，comet danmu_messages_total{in} 递增（readPump→uplink 生效）
 //
+// 前置：一个 etcd（默认 localhost:17379），以及用 -etcd 指到它、已启动的 logic+comet。
 // Kafka 段（logic→Kafka→job 消费）为标准 kafka-go，无 broker 时不在此验证。
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
 )
 
@@ -29,7 +31,7 @@ func main() {
 	cometWS := flag.String("comet-ws", "localhost:18080", "comet WS/HTTP addr")
 	cometRPC := flag.String("comet-rpc", "localhost:17500", "comet gRPC addr")
 	logicRPC := flag.String("logic-rpc", "localhost:17400", "logic gRPC addr")
-	registryURL := flag.String("registry", "http://localhost:17350", "registry base URL")
+	etcdEndpoints := flag.String("etcd", "localhost:17379", "etcd 客户端端点(逗号分隔)")
 	token := flag.String("token", "danmu-secret-token", "auth token")
 	flag.Parse()
 
@@ -45,13 +47,23 @@ func main() {
 
 	fmt.Println("=== goim 链路集成验证 ===")
 
-	step("registry 发现 comet", func() error {
-		addrs, err := fetchService(*registryURL, "comet")
+	step("etcd 发现 comet", func() error {
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(*etcdEndpoints, ","),
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defer cli.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		addrs, err := etcdreg.List(ctx, cli, "comet")
 		if err != nil {
 			return err
 		}
 		if len(addrs) == 0 {
-			return fmt.Errorf("registry 未发现 comet 实例")
+			return fmt.Errorf("etcd 未发现 comet 实例")
 		}
 		fmt.Printf("    comet 实例: %v\n", addrs)
 		return nil
@@ -174,19 +186,6 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("ALL PASSED ✓")
-}
-
-func fetchService(registryURL, service string) ([]string, error) {
-	resp, err := http.Get(registryURL + "/services?service=" + service)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var addrs []string
-	if err := json.NewDecoder(resp.Body).Decode(&addrs); err != nil {
-		return nil, err
-	}
-	return addrs, nil
 }
 
 // scrapeCounter 从 /metrics 抓一个精确匹配的计数器值。

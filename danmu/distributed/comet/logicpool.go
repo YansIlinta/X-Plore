@@ -1,120 +1,42 @@
 package main
 
 import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"sync"
-	"time"
-
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/naming/resolver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/YansIlinta/danmu-distributed/lb"
-
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
 )
 
-// logicPool 维护到各 logic 实例的 gRPC 连接，并用一致性哈希环按 roomID 路由，
-// 使同一房间的上行总落到同一 logic 实例（便于 logic 侧做每房间聚合/限流）。
+// logicPool 是对 logic 实例集合的一条 gRPC 连接：etcd 官方 naming/resolver 按
+// 前缀实时 watch 地址集，round_robin 负载均衡在实例间分发上行弹幕。
+//
+// 原自研的一致性哈希（roomID→固定 logic 实例）已删除：logic 完全无状态，
+// 按房间粘性不是正确性要求，扩缩容也不需要重映射；负载均衡交给 gRPC 的标准策略。
 type logicPool struct {
-	registryURL string
-	static      []string
-
-	mu      sync.RWMutex
-	conns   map[string]*grpc.ClientConn
-	clients map[string]pb.LogicServiceClient
-	ring    *lb.Ring
+	conn *grpc.ClientConn
+	cli  pb.LogicServiceClient
 }
 
-func newLogicPool(registryURL string, static []string) *logicPool {
-	p := &logicPool{
-		registryURL: registryURL,
-		static:      static,
-		conns:       make(map[string]*grpc.ClientConn),
-		clients:     make(map[string]pb.LogicServiceClient),
-		ring:        lb.NewRing(100),
-	}
-	if len(static) > 0 {
-		p.apply(static)
-	} else if registryURL != "" {
-		p.refresh()
-	}
-	return p
-}
-
-func (p *logicPool) refresh() {
-	if len(p.static) > 0 {
-		return // 静态配置不刷新
-	}
-	addrs, err := fetchService(p.registryURL, "logic")
-	if err != nil {
-		log.Printf("[comet] registry fetch logic error: %v", err)
-		return
-	}
-	p.apply(addrs)
-}
-
-func (p *logicPool) apply(addrs []string) {
-	alive := make(map[string]bool, len(addrs))
-	for _, a := range addrs {
-		alive[a] = true
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, a := range addrs {
-		if _, ok := p.conns[a]; ok {
-			continue
-		}
-		conn, err := grpc.NewClient(a, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Printf("[comet] dial logic %s: %v", a, err)
-			continue
-		}
-		p.conns[a] = conn
-		p.clients[a] = pb.NewLogicServiceClient(conn)
-	}
-	for a, conn := range p.conns {
-		if !alive[a] {
-			conn.Close()
-			delete(p.conns, a)
-			delete(p.clients, a)
-		}
-	}
-	p.ring.Reset(addrs)
-}
-
-// forRoom 返回 roomID 一致性哈希归属的 logic 客户端。
-func (p *logicPool) forRoom(roomID string) (pb.LogicServiceClient, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	addr := p.ring.Get(roomID)
-	if addr == "" {
-		return nil, false
-	}
-	c, ok := p.clients[addr]
-	return c, ok
-}
-
-func (p *logicPool) empty() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return len(p.clients) == 0
-}
-
-// httpClient 带超时：registry 不可达时 refresh 必须在几秒内失败返回，
-// 否则 3s 一次的 refresh tick 会堆积卡死的 goroutine。
-var httpClient = &http.Client{Timeout: 5 * time.Second}
-
-func fetchService(registryURL, service string) ([]string, error) {
-	resp, err := httpClient.Get(registryURL + "/services?service=" + service)
+// newLogicPool 用 etcd 客户端建连接。target 的路径段是注册 key 前缀
+// （见 etcdreg 包注释：无前导斜杠，value 为 naming.Update JSON）。
+func newLogicPool(etcdCli *clientv3.Client) (*logicPool, error) {
+	builder, err := resolver.NewBuilder(etcdCli)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	var addrs []string
-	if err := json.NewDecoder(resp.Body).Decode(&addrs); err != nil {
+	conn, err := grpc.NewClient(
+		"etcd:///"+etcdreg.ServicePrefix+"logic",
+		grpc.WithResolvers(builder),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
+	)
+	if err != nil {
 		return nil, err
 	}
-	return addrs, nil
+	return &logicPool{conn: conn, cli: pb.NewLogicServiceClient(conn)}, nil
 }
+
+func (p *logicPool) close() { _ = p.conn.Close() }
