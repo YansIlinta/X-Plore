@@ -113,7 +113,7 @@
 
 ### 4.2 削峰与批量
 
-- 上行：channel 队列 + 固定 worker 数（约 `CPU*4`）。
+- 上行：channel 队列 + 固定 worker 数（约 `CPU*2`）。
 - 批量：按条数阈值或时间窗口聚合后再广播 / 发布，减少 syscall 与网络次数。
 - Redis：按房间批量 publish，降低 Pub/Sub 开销。
 

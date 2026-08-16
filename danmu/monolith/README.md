@@ -39,14 +39,14 @@ graph TB
         WS1[WebSocket Handler]
         Hub1[Hub 连接管理]
         MQ1[消息队列 chan 100K]
-        WP1[Worker Pool CPU*4]
+        WP1[Worker Pool CPU*2]
     end
 
     subgraph Server2[弹幕服务器 srv2]
         WS2[WebSocket Handler]
         Hub2[Hub 连接管理]
         MQ2[消息队列 chan 100K]
-        WP2[Worker Pool CPU*4]
+        WP2[Worker Pool CPU*2]
     end
 
     subgraph MQ[消息中间件]

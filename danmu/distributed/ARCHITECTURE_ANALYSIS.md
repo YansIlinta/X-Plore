@@ -142,7 +142,7 @@ Prometheus 指标，**仍然只有 comet 暴露 `/metrics`**（logic/job 新增�
 ## 6. 服务发现（etcd，替代原自研 registry/lb）
 
 - 数据结构：etcd key `danmu/services/<service>/<addr>` + 10s lease（`etcdreg`）。**无实例元数据**（无实例 id、无启动时间），advertise 地址是唯一标识。无注销接口（有意设计，崩溃靠租约过期清理）。
-- ✅ 观测地址通过**并列注册一个 `*-http` 服务名**解决，而不是给注册数据加元数据字段。代价：ops 侧要把 `comet-http` 的实例和 `comet` 的实例重新对上，做法是**按主机名匹配**（`ops/collector.go:366` `rpcAddrOf`，如 `comet1:8080` ↔ `comet1:7500`）。同机多实例（同主机名不同端口）会对错，目前部署形态下不触发。
+- ✅ 观测地址通过**并列注册一个 `*-http` 服务名**解决，而不是给注册数据加元数据字段。代价：ops 侧要把 `comet-http` 的实例和 `comet` 的实例重新对上，做法是**按主机名匹配**（`ops/collector.go:373` `takeAddr`，如 `comet1:8080` ↔ `comet1:7500`）。同机多实例（同主机名不同端口）会对错，目前部署形态下不触发。
 - comet 侧 `logicPool`：**一条 gRPC 连接**，etcd 官方 naming/resolver watch 前缀 + round_robin 负载均衡（`comet/logicpool.go:25`）。原自研一致性哈希（roomID→固定 logic）已删除——logic 无状态，粘性不是正确性要求；原 `logicPool.empty()` 随重构一并消失（comet `/health` 依旧是静态 ok）。
 - job 侧 `cometPool`：`etcdreg.Watch` 驱动 `apply()`（`job/main.go:66`）重建连接池，替代原 3s 轮询；扇出全部 comet（`job/main.go:114`），实例增删有日志；✅ `addrs()`（`job/main.go:150`）供 stats 暴露当前列表。
 - 三个服务的 `*-http` 注册都是 ttl 10s + keepalive，与 RPC 注册同参数。job 原先不注册任何东西，现在为观测注册 `job-http`（`job/main.go:240`）。注册统一走 `etcdreg.KeepAlive`：注册失败每 2s 重试、续租中断自动重注册——etcd 晚于服务就绪或短暂不可达都不致命（同原 registry.KeepAlive 语义，`etcdreg/etcdreg.go`，有自愈测试覆盖）。
@@ -220,7 +220,7 @@ lag 的失败语义是明确的「不伪造」：任一步失败 → `KafkaInfo.
 **采集链路**（`Collector.pollOnce`，`ops/collector.go:231`）：
 1. `etcdreg.ListAll`（`listServices`，`ops/collector.go:299`）拿全部服务 map；etcd 掉线则**沿用上一轮实例清单继续探测**（`ops/collector.go:246`），不至于一掉线整个面板变空。
 2. 并发探测各 `*-http` 实例（`probeServices`，`ops/collector.go:314`）：`/health` 判活 → `/api/v1/stats` 取原始 JSON → comet 额外抓 `/metrics` 算速率。httpClient 超时 2s，「任何实例慢都不能拖垮采集循环」。
-3. `rpcAddrOf` 按主机名把 HTTP 地址和 RPC 地址对上（见 §6 的同机多实例限制）。
+3. `takeAddr`（`ops/collector.go:373`）按主机名把 HTTP 地址和 RPC 地址对上（见 §6 的同机多实例限制）。
 4. 健康判定 `evalHealth`（`ops/collector.go:544`）：etcd 不可达 / 所有 comet 不可达 / Kafka 启用观测但不可用 → `critical`；任一实例不可达 → `degraded`；否则 `healthy`。
 5. `diffEvents`（`ops/collector.go:594`）对比前后快照产出事件：实例出现/消失、etcd 掉线/恢复、健康状态翻转。首轮不发事件（全是「出现」，无信息量）。事件 `Kind` 由 `registry` 改为 `etcd`，快照字段 `registry_up` 改为 `etcd_up`。
 

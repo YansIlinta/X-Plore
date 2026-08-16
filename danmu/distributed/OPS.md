@@ -58,7 +58,7 @@ docker compose -f docker-compose.goim.yml up -d --build
 | comet `/health`、`/api/v1/stats`（O(1) 原子计数）、`/metrics`（Prometheus 格式） | 已有（Ops Console 之前为观测各服务补的） | 直接复用 |
 | logic `/health`、`/api/v1/stats` | 已有（同上） | 直接复用 |
 | comet `/api/v1/rooms`（分页枚举，Hub 全量 + 内存分页） | 已有 | ops 按需扇出合并 |
-| Kafka Admin（lag） | 新增于 `ops/kafka.go`（kafka-go Client，只读 Metadata/ListOffsets/OffsetFetch） | 无 broker 时 Available=false |
+| Kafka Admin（lag） | 新增于 `ops/collector.go:647`（`kafkaLoop`/`kafkaOnce`，kafka-go Client，只读 Metadata/ListOffsets/OffsetFetch） | 无 broker 时 Available=false |
 | 消息 trace（`core/trace.go` + 各服务 `/api/v1/traces`） | 新增（见 §5） | 需 `-trace-sample` 一致 |
 | ops HTTP API / SSE 前端轮询 | 新增 | 实时数据前端 2s 轮询，无 WebSocket |
 | loadtest 集成 | 复用 `../monolith/loadtest` 二进制，ops 只做启停/解析 | 二进制不存在时页显"不可用" |

@@ -14,7 +14,7 @@ const (
 )
 
 // WorkerPool 固定大小的 worker 池，消费 msgQueue，批量聚合后广播
-// worker 数量 = runtime.NumCPU() * 4
+// worker 数量 = runtime.NumCPU() * 2
 type WorkerPool struct {
 	hub     *Hub
 	workers int
