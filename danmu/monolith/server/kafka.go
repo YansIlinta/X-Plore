@@ -56,6 +56,30 @@ func (kp *KafkaProducer) Send(msg *Message) error {
 	})
 }
 
+// PrepareBatch 在消息被回收前完成序列化，返回可安全异步发送的 Kafka 消息
+func (kp *KafkaProducer) PrepareBatch(msgs []*Message) []kafka.Message {
+	kafkaMsgs := make([]kafka.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		kafkaMsgs = append(kafkaMsgs, kafka.Message{
+			Key:   []byte(msg.RoomID),
+			Value: data,
+		})
+	}
+	return kafkaMsgs
+}
+
+// SendPrepared 异步发送已序列化的 Kafka 消息
+func (kp *KafkaProducer) SendPrepared(kafkaMsgs []kafka.Message) error {
+	if len(kafkaMsgs) == 0 {
+		return nil
+	}
+	return kp.writer.WriteMessages(kp.ctx, kafkaMsgs...)
+}
+
 // Close 关闭 Kafka 生产者
 func (kp *KafkaProducer) Close() error {
 	return kp.writer.Close()

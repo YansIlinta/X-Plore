@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -16,7 +17,7 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = 30 * time.Second
 	maxMessageSize = 4096
-	sendChSize     = 256
+	sendChSize     = 512
 )
 
 // Client 代表一个 WebSocket 连接
@@ -33,10 +34,10 @@ type Client struct {
 	cancel  context.CancelFunc
 
 	closeOnce   sync.Once
-	closeCode   int // Close()设置，writePump在ctx.Done()后据此发送CloseMessage
+	closeCode   int
 	closeReason string
 
-	sessionExpiresAt atomic.Int64 // UnixNano，会话令牌到期时间；由writePump定期检查，过期未续期则断开
+	sessionExpiresAt atomic.Int64
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx context.Context) *Client {
@@ -47,7 +48,7 @@ func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx con
 		sendCh:  make(chan []byte, sendChSize),
 		uid:     uid,
 		roomID:  roomID,
-		limiter: NewTokenBucket(20, 50), // 每秒 20 条，突发 50
+		limiter: NewTokenBucket(20, 50),
 		ctx:     ctx,
 		cancel:  cancel,
 	}
@@ -174,8 +175,6 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			// c.closeCode/closeReason 由 Close() 在 cancel() 之前写入；
-			// context 取消的 happens-before 语义保证这里能读到最新值
 			code := c.closeCode
 			reason := c.closeReason
 			if code == 0 {
@@ -188,15 +187,28 @@ func (c *Client) writePump() {
 			return
 
 		case message := <-c.sendCh:
-			// sendCh 从不 close（见 Close() 注释），message 恒为有效数据
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				return
+			// 批量排空：将 sendCh 中所有待发消息合并为一次 WebSocket 写入
+			pending := len(c.sendCh)
+			if pending == 0 {
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+					return
+				}
+			} else {
+				batched := make([][]byte, 0, pending+1)
+				batched = append(batched, message)
+				for i := 0; i < pending; i++ {
+					batched = append(batched, <-c.sendCh)
+				}
+				merged := mergeJSONArrays(batched)
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := c.conn.WriteMessage(websocket.TextMessage, merged); err != nil {
+					return
+				}
 			}
 
 		case <-ticker.C:
 			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
-				// 会话令牌到期前未收到有效 reauth，主动断开
 				c.Close(4008, "session expired")
 				continue
 			}
@@ -206,6 +218,32 @@ func (c *Client) writePump() {
 			}
 		}
 	}
+}
+
+// mergeJSONArrays 将多个 JSON 数组合并为一个
+// 例如 [{"a":1}] + [{"b":2},{"c":3}] → [{"a":1},{"b":2},{"c":3}]
+func mergeJSONArrays(arrays [][]byte) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	first := true
+	for _, a := range arrays {
+		a = bytes.TrimSpace(a)
+		if len(a) < 2 {
+			continue
+		}
+		inner := a[1 : len(a)-1] // strip outer []
+		inner = bytes.TrimSpace(inner)
+		if len(inner) == 0 {
+			continue
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		buf.Write(inner)
+		first = false
+	}
+	buf.WriteByte(']')
+	return buf.Bytes()
 }
 
 // Close 主动关闭连接（踢人/关房间）

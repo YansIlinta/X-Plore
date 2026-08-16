@@ -156,7 +156,6 @@ func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
 		select {
 		case c.sendCh <- data:
 		default:
-			// sendCh 满（慢客户端），丢弃消息，保护整体不阻塞
 		}
 	}
 }
