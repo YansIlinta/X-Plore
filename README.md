@@ -74,7 +74,7 @@ cd danmu/monolith && go test -race ./server/
 
 | 文档 | 内容 |
 |------|------|
-| [danmu/PROJECT.md](./danmu/PROJECT.md) | 弹幕主线统合：架构取舍、压测数据、面试讲解 |
+| [danmu/PROJECT.md](./danmu/PROJECT.md) | 弹幕主线统合：架构取舍、压测数据 |
 | [danmu/monolith/README.md](./danmu/monolith/README.md) | 单体版部署、压测剧本、系统调优清单、接口文档 |
 | [danmu/monolith/REVIEW.md](./danmu/monolith/REVIEW.md) | 单体版代码审查报告（H/M/L 逐条问题与修复） |
 | [danmu/distributed/DESIGN.md](./danmu/distributed/DESIGN.md) | goim 式微服务化设计：Comet/Logic/Job 分层与 etcd |

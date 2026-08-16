@@ -1,6 +1,6 @@
 # X-Plore · 高并发直播弹幕系统（统合文档）
 
-> 本文档把仓库内分散的 README / DESIGN / REVIEW 等材料，**统合成一份可阅读、可演示、可面试讲解**的「高并发直播弹幕」主项目说明。  
+> 本文档把仓库内分散的 README / DESIGN / REVIEW 等材料，**统合成一份可阅读、可演示**的「高并发直播弹幕」主项目说明。  
 > 旁支项目（WaveHub 音乐站等）见文末「仓库边界」，不纳入本主线。
 
 ---
@@ -26,10 +26,10 @@
 
 | 形态 | 目录 | 跨机广播 | 适用场景 |
 |------|------|----------|----------|
-| **单体基线** | `monolith/server/` | Redis Pub/Sub | 开发/面试讲清「长连接 + 扇出」；少依赖快速演示 |
+| **单体基线** | `monolith/server/` | Redis Pub/Sub | 开发讲清「长连接 + 扇出」；少依赖快速演示 |
 | **goim 微服务** | `distributed/comet/` + `distributed/logic/` + `distributed/job/` + `distributed/core/` + `distributed/etcdreg/`（etcd 注册/发现） | Kafka → Job → Comet.PushRoom | 连接/逻辑/扇出独立扩缩；对齐 Bilibili goim 思路 |
 
-**设计取舍（面试高频）**：
+**设计取舍**：
 
 - Redis Cluster Pub/Sub：每条消息会扩散到集群各节点，吞吐随规模**负向扩展**。
 - goim 路径：Kafka 削峰 + Job **定向**推送到持有房间连接的 Comet，Comet 无该房间则丢弃，扇出更可控。
@@ -267,17 +267,7 @@ curl http://localhost:8081/metrics
 
 ---
 
-## 8. 面试 / 作品集讲述骨架（2～3 分钟）
-
-1. **场景**：直播间百万长连接，弹幕要低延迟、可丢、可水平扩展。  
-2. **单体**：WS + 分片 Hub + worker 批量 + Redis 实时 + Kafka 落库，10k 连接低扇出 P90 ~5ms。  
-3. **瓶颈**：Redis Pub/Sub 全网扩散、Prometheus 高基数标签、连接注册单点等——对照 `REVIEW.md` 修过。  
-4. **演进**：按 goim 拆 Comet/Logic/Job，Kafka 削峰 + 定向 PushRoom；服务发现自研 registry/lb → 2026-08 换 **etcd + gRPC round_robin**（标准组件，删掉全部自研 RPC 骨架）。  
-5. **边界**：弹幕允许丢与乱序；控制面跨机与 etcd TLS 已落地（k8s overlay）；单机百万连接还需内核/epoll 层继续挖。
-
----
-
-## 9. 文档索引
+## 8. 文档索引
 
 | 文档 | 内容 |
 |------|------|
@@ -288,7 +278,7 @@ curl http://localhost:8081/metrics
 
 ---
 
-## 10. 状态快照（截至仓库内记录 2026-07）
+## 9. 状态快照（截至仓库内记录 2026-07）
 
 - [x] 单体可构建、可压测；H1–H2 / M1–M6 / L1–L3 等审查项已处理一轮  
 - [x] core 单测（AC、令牌、令牌桶）  
@@ -302,7 +292,7 @@ curl http://localhost:8081/metrics
 
 ---
 
-## 11. 视频平台演进（2026-07 起，已归档移除）
+## 10. 视频平台演进（2026-07 起，已归档移除）
 
 > 原 WaveHub 点播平台（user/video/media 等 Kratos 微服务 + React 前端）已从仓库移除，
-> 历史内容保留在 git 历史中。本文 1–10 节（连接层与压测叙事）为弹幕主线核心。
+> 历史内容保留在 git 历史中。本文 1–9 节（连接层与压测叙事）为弹幕主线核心。
