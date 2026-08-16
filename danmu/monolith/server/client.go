@@ -113,11 +113,9 @@ func (c *Client) readPump() {
 			continue
 		}
 
-		// 限制内容长度
-		content := up.Content
-		if len(content) > 500 {
-			content = content[:500]
-		}
+		// 限制内容长度。按 rune 边界截断：字节切片会切断 UTF-8 字符，
+		// 广播出去变成 � 乱码（与 distributed/core 的 ReadPump 对齐）。
+		content := truncateContent(up.Content, 500)
 		// 本地 AC 自动机敏感词过滤，纯内存匹配不阻塞主链路
 		content = c.hub.filter.Filter(content)
 
@@ -167,8 +165,10 @@ func (c *Client) handleReauth(token string) {
 // 并发约束：只有 writePump 调用 conn.WriteMessage，其他 goroutine 禁止直接写
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
+	sessionTicker := time.NewTicker(time.Second)
 	defer func() {
 		ticker.Stop()
+		sessionTicker.Stop()
 		c.conn.Close()
 	}()
 
@@ -207,17 +207,33 @@ func (c *Client) writePump() {
 				}
 			}
 
-		case <-ticker.C:
+		case <-sessionTicker.C:
+			// 会话到期检查独立于 ping 周期：若挂在 30s ping ticker 上，
+			// 到期后最长 30s 才断开，踢人/续期失效的感知被严重延迟。
 			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
 				c.Close(4008, "session expired")
-				continue
 			}
+
+		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
 	}
+}
+
+// truncateContent 把内容截断到最多 maxRunes 个 rune。字节切片（content[:n]）会切断
+// UTF-8 字符产生 � 乱码，必须先按 rune 边界截断；长度未超限时原样返回（不分配）。
+func truncateContent(content string, maxRunes int) string {
+	if len(content) <= maxRunes {
+		return content
+	}
+	runes := []rune(content)
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	return string(runes)
 }
 
 // mergeJSONArrays 将多个 JSON 数组合并为一个

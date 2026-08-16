@@ -152,8 +152,10 @@ func (c *Client) handleReauth(token string) {
 // WritePump 唯一写者：消费 sendCh 写往 conn，兼做心跳与会话到期检查。
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
+	sessionTicker := time.NewTicker(time.Second)
 	defer func() {
 		ticker.Stop()
+		sessionTicker.Stop()
 		c.conn.Close()
 	}()
 
@@ -174,11 +176,14 @@ func (c *Client) WritePump() {
 				return
 			}
 
-		case <-ticker.C:
+		case <-sessionTicker.C:
+			// 会话到期检查独立于 ping 周期：若挂在 30s ping ticker 上，
+			// 到期后最长 30s 才断开（与 monolith server 对齐）。
 			if time.Now().UnixNano() > c.sessionExpiresAt.Load() {
 				c.Close(4008, "session expired")
-				continue
 			}
+
+		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return

@@ -27,6 +27,8 @@ func (m *mockLogic) OnMessage(_ context.Context, req *pb.OnMessageReq) (*pb.OnMe
 	return &pb.OnMessageResp{MsgId: "m-" + strconv.FormatInt(m.hits.Load(), 10), Filtered: req.Content}, nil
 }
 
+func (m *mockLogic) Reset() { m.hits.Store(0) }
+
 // 起一个 mock logic gRPC 服务，返回其监听地址与实例。
 func serveMockLogic(t *testing.T) (string, *mockLogic) {
 	t.Helper()
@@ -82,6 +84,29 @@ func TestLogicPoolRoundRobinViaEtcd(t *testing.T) {
 	}
 
 	const n = 20
+
+	// 预热：grpc.NewClient 是懒连接，第二个 logic 的子通道可能尚未 READY。
+	// round_robin 的 picker 只在 READY 子通道间轮转——若第二个子通道没就绪，
+	// 所有请求都会固定落到第一个实例（历史上 20 个并发请求全部命中 logic1 的 flaky 根因）。
+	// 这里持续发单发请求，直到两个实例都被 picker 选中（= 两个子通道都已 READY），
+	// 再清零计数跑正式并发验证。
+	pool.conn.Connect() // 主动触发所有地址的连接建立，缩短预热时间
+	warmDeadline := time.Now().Add(10 * time.Second)
+	for m1.hits.Load() == 0 || m2.hits.Load() == 0 {
+		if time.Now().After(warmDeadline) {
+			t.Fatalf("预热超时：10s 内 round_robin 未覆盖两个 logic 实例 (logic1=%d logic2=%d)", m1.hits.Load(), m2.hits.Load())
+		}
+		rctx, cancel := context.WithTimeout(ctx, time.Second)
+		_, err := pool.cli.OnMessage(rctx, &pb.OnMessageReq{RoomId: "warmup", Content: "hi"})
+		cancel()
+		if err != nil {
+			t.Fatalf("预热 OnMessage: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	m1.Reset()
+	m2.Reset()
+
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
