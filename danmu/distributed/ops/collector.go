@@ -229,6 +229,8 @@ func (c *Collector) pollOnce(first bool) {
 	}
 
 	snap.Services = c.probeServices(all)
+	// 清理已消失实例的差分样本：实例 churn 下 prevStats/prevCounts 会无界增长
+	c.prunePrev(snap.Services)
 
 	c.mu.RLock()
 	kafkaInfo := c.kafka
@@ -435,6 +437,30 @@ func (c *Collector) statRates(httpAddr string, stats map[string]any) map[string]
 		out[strings.TrimSuffix(k, "_total")] = (cv - pv) / dt
 	}
 	return out
+}
+
+// prunePrev 删除已不存在实例的差分样本（prevStats/prevStatsTS/prevCounts），
+// 防止实例反复上线/下线时这些 map 无界增长。
+func (c *Collector) prunePrev(services []Service) {
+	live := make(map[string]bool)
+	for _, svc := range services {
+		for _, it := range svc.Instances {
+			live[it.HTTPAddr] = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.prevStats {
+		if !live[k] {
+			delete(c.prevStats, k)
+			delete(c.prevStatsTS, k)
+		}
+	}
+	for k := range c.prevCounts {
+		if !live[k] {
+			delete(c.prevCounts, k)
+		}
+	}
 }
 
 // getJSON GET url 并解析 JSON object；2s 超时由 httpClient 保证。

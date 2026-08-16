@@ -28,6 +28,9 @@ var ltLineRe = regexp.MustCompile(
 type loadtestManager struct {
 	bin   string
 	token string
+	// ctx 是 ops 进程的生命周期 ctx（来自 signal.NotifyContext）：压测子进程随它退出，
+	// ops 优雅关闭时不会再留下孤儿压测进程继续打流量。
+	ctx context.Context
 
 	mu        sync.Mutex
 	running   bool
@@ -41,9 +44,9 @@ type loadtestManager struct {
 }
 
 // NewLoadtestManager 构造压测管理器。bin 是相对/绝对路径或 PATH 里的可执行名；
-// 不存在时 available=false，Start 会返回明确错误。
-func NewLoadtestManager(bin, token string) *loadtestManager {
-	m := &loadtestManager{bin: bin, token: token}
+// 不存在时 available=false，Start 会返回明确错误。ctx 是 ops 的生命周期 ctx。
+func NewLoadtestManager(bin, token string, ctx context.Context) *loadtestManager {
+	m := &loadtestManager{bin: bin, token: token, ctx: ctx}
 	if _, err := os.Stat(bin); err == nil {
 		m.available = true
 	} else if p, err := exec.LookPath(bin); err == nil {
@@ -53,17 +56,17 @@ func NewLoadtestManager(bin, token string) *loadtestManager {
 }
 
 // Start 启动压测子进程。已在运行则报 409。
+// 整个"检查→启动→登记"过程持锁：避免并发 start 启动两个压测进程、
+// 前一个的 cancel 被覆盖成失控孤儿（TOCTOU）。
 func (m *loadtestManager) Start(params map[string]any) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.running {
-		m.mu.Unlock()
 		return fmt.Errorf("loadtest already running")
 	}
 	if !m.available {
-		m.mu.Unlock()
 		return fmt.Errorf("loadtest binary not found: %s", m.bin)
 	}
-	m.mu.Unlock()
 
 	server, _ := params["server"].(string)
 	if server == "" {
@@ -80,9 +83,13 @@ func (m *loadtestManager) Start(params map[string]any) error {
 	if token == "" {
 		token = m.token
 	}
+	// 参数上限保护：避免误配打爆目标（压测目标是生产集群时尤其重要）
+	conns = clampInt(conns, 1, 100000)
+	rooms = clampInt(rooms, 1, 10000)
+	rate = clampFloat(rate, 0.01, 10000)
 
 	reportPath := filepath.Join(os.TempDir(), fmt.Sprintf("danmu-loadtest-%d.json", time.Now().Unix()))
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.ctx)
 	cmd := exec.CommandContext(ctx, m.bin,
 		"-server", server,
 		"-conns", strconv.Itoa(conns),
@@ -108,7 +115,6 @@ func (m *loadtestManager) Start(params map[string]any) error {
 		return err
 	}
 
-	m.mu.Lock()
 	m.running = true
 	m.params = map[string]any{"server": server, "conns": conns, "rooms": rooms, "rate": rate, "duration": duration}
 	m.startedAt = time.Now()
@@ -116,7 +122,6 @@ func (m *loadtestManager) Start(params map[string]any) error {
 	m.report = nil
 	m.err = ""
 	m.cancel = cancel
-	m.mu.Unlock()
 
 	go func() {
 		err := cmd.Wait()
@@ -153,15 +158,17 @@ func (m *loadtestManager) Status() map[string]any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var elapsed *float64
+	var startedAt any
 	if !m.startedAt.IsZero() {
 		e := time.Since(m.startedAt).Seconds()
 		elapsed = &e
+		startedAt = m.startedAt
 	}
 	return map[string]any{
 		"available":  m.available,
 		"running":    m.running,
 		"params":     m.params,
-		"started_at": m.startedAt,
+		"started_at": startedAt, // 从未启动过 → null（而不是零值时间串）
 		"elapsed_s":  elapsed,
 		"latest":     m.latest,
 		"report":     m.report,
@@ -222,6 +229,26 @@ func floatOr(v any, def float64) float64 {
 		return float64(n)
 	}
 	return def
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func tail(s string, n int) string {

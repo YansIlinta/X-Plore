@@ -113,25 +113,34 @@ func (p *cometPool) snapshot() []pb.CometServiceClient {
 // pushRoom 把一个房间的一批消息推给所有 comet（各自本地过滤）。
 // traceIDs 是本批中命中采样的 msg_id：经 gRPC metadata 透传给 comet，
 // 让它能在投递环节记 span——PushRoom 的 proto 契约因此不用动。
+//
+// 扇出是并发的：单个坏 comet 的 2s 超时不能拖垮整条广播流水线
+// （串行时每轮 flush 按「comet 数 × 2s」放大卡顿）。
 func (p *cometPool) pushRoom(roomID string, payload []byte, traceIDs []string) {
 	clients := p.snapshot()
 	var delivered int64
+	var wg sync.WaitGroup
 	for _, c := range clients {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if len(traceIDs) > 0 {
-			ctx = metadata.AppendToOutgoingContext(ctx, core.TraceMetadataKey, strings.Join(traceIDs, ","))
-		}
-		resp, err := c.PushRoom(ctx, &pb.PushRoomReq{RoomId: roomID, Payload: payload})
-		cancel()
-		if err != nil {
-			statPushErr.Add(1)
-			log.Printf("[job] pushRoom room=%s error: %v", roomID, err)
-			continue
-		}
-		statPushOK.Add(1)
-		statDelivered.Add(int64(resp.Delivered))
-		delivered += int64(resp.Delivered)
+		wg.Add(1)
+		go func(cli pb.CometServiceClient) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if len(traceIDs) > 0 {
+				ctx = metadata.AppendToOutgoingContext(ctx, core.TraceMetadataKey, strings.Join(traceIDs, ","))
+			}
+			resp, err := cli.PushRoom(ctx, &pb.PushRoomReq{RoomId: roomID, Payload: payload})
+			if err != nil {
+				statPushErr.Add(1)
+				log.Printf("[job] pushRoom room=%s error: %v", roomID, err)
+				return
+			}
+			statPushOK.Add(1)
+			statDelivered.Add(int64(resp.Delivered))
+			atomic.AddInt64(&delivered, int64(resp.Delivered))
+		}(c)
 	}
+	wg.Wait()
 	// 扇出完成才记 span：一条 msg 对应一条 job.push，detail 汇总本次扇出结果。
 	if len(traceIDs) > 0 {
 		now := time.Now().UnixNano()
@@ -191,7 +200,7 @@ func main() {
 		GroupID:        "danmu-job",
 		MinBytes:       1,
 		MaxBytes:       10e6,
-		CommitInterval: time.Second, // 广播是 fire-and-forget，at-most-once 可接受（弹幕允许丢）
+		CommitInterval: 0, // 同步提交：读到即提交，at-most-once（弹幕允许丢，但绝不重复）
 		StartOffset:    kafka.LastOffset,
 	})
 	defer reader.Close()
@@ -280,26 +289,39 @@ func main() {
 		}
 	}()
 
+	// ingest 聚合一条 Kafka 消息进当前房间批次。
+	ingest := func(m kafka.Message) {
+		statConsumed.Add(1)
+		roomID := string(m.Key) // logic 用 roomID 作 key，无需反序列化
+		b := roomBatch[roomID]
+		if b == nil {
+			b = &batch{}
+			roomBatch[roomID] = b
+		}
+		b.values = append(b.values, m.Value)
+		// 只扫 header，不解 payload：非采样消息在这条路径上零额外成本。
+		if id := traceIDOf(m); id != "" {
+			b.traceIDs = append(b.traceIDs, id)
+			tracer.Record(id, core.HopJobConsume, roomID, "", time.Now().UnixNano())
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
-			log.Println("[job] stopped")
-			return
+			// 排空缓冲里已读到但尚未处理的 Kafka 消息再 flush，减少停服丢量
+			for {
+				select {
+				case m := <-msgCh:
+					ingest(m)
+				default:
+					flush()
+					log.Println("[job] stopped")
+					return
+				}
+			}
 		case m := <-msgCh:
-			statConsumed.Add(1)
-			roomID := string(m.Key) // logic 用 roomID 作 key，无需反序列化
-			b := roomBatch[roomID]
-			if b == nil {
-				b = &batch{}
-				roomBatch[roomID] = b
-			}
-			b.values = append(b.values, m.Value)
-			// 只扫 header，不解 payload：非采样消息在这条路径上零额外成本。
-			if id := traceIDOf(m); id != "" {
-				b.traceIDs = append(b.traceIDs, id)
-				tracer.Record(id, core.HopJobConsume, roomID, "", time.Now().UnixNano())
-			}
+			ingest(m)
 		case <-timer.C:
 			flush()
 			timer.Reset(flushWindow)
@@ -340,8 +362,12 @@ func buildArray(values [][]byte) []byte {
 	return buf.Bytes()
 }
 
+// httpClient 带超时：registry 不可达时 refresh 必须在几秒内失败返回，
+// 否则 3s 一次的 refresh tick 会堆积卡死的 goroutine。
+var httpClient = &http.Client{Timeout: 5 * time.Second}
+
 func fetchService(registryURL, service string) ([]string, error) {
-	resp, err := http.Get(registryURL + "/services?service=" + service)
+	resp, err := httpClient.Get(registryURL + "/services?service=" + service)
 	if err != nil {
 		return nil, err
 	}

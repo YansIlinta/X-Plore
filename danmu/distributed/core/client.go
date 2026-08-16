@@ -19,6 +19,15 @@ const (
 	sendChSize     = 256
 )
 
+// closeState 是关闭时记录的状态。用 atomic.Pointer 发布而不是裸字段：
+// WritePump 的 ctx.Done 分支可能被「非 Close 路径的 cancel」唤醒（如 ReadPump defer、
+// 父 ctx 取消），此时管理面并发 Close() 的写入与读取之间没有 channel 同步，
+// 裸 string/int 字段会构成数据竞态（string 头可能被撕裂）。
+type closeState struct {
+	code   int
+	reason string
+}
+
 // Client 一个 WebSocket 连接。writePump 是 conn 唯一写者，所有外发经 sendCh 串行写出。
 type Client struct {
 	hub     *Hub
@@ -30,9 +39,8 @@ type Client struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	closeOnce   sync.Once
-	closeCode   int
-	closeReason string
+	closeOnce sync.Once
+	closeInfo atomic.Pointer[closeState]
 
 	sessionExpiresAt atomic.Int64
 }
@@ -113,7 +121,12 @@ func (c *Client) ReadPump() {
 		}
 		content := up.Content
 		if len(content) > 500 {
-			content = content[:500]
+			// 按 rune 边界截断：字节切片会切断 UTF-8 字符，广播出去变成 � 乱码
+			runes := []rune(content)
+			if len(runes) > 500 {
+				runes = runes[:500]
+			}
+			content = string(runes)
 		}
 		// 敏感词过滤 + msg_id 生成 + 落 Kafka 都在 Logic 侧做；comet 只转发。
 		MetricMsgIn()
@@ -147,9 +160,9 @@ func (c *Client) WritePump() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			code, reason := c.closeCode, c.closeReason
-			if code == 0 {
-				code, reason = 1001, "server shutting down"
+			code, reason := 1001, "server shutting down"
+			if st := c.closeInfo.Load(); st != nil {
+				code, reason = st.code, st.reason
 			}
 			c.conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(code, reason), time.Now().Add(writeWait))
@@ -176,10 +189,10 @@ func (c *Client) WritePump() {
 
 // Close 主动关闭：记录关闭码后 cancel，由 WritePump 感知后发送 CloseMessage。
 // 不直接写 conn（写者只能是 WritePump），也不 close(sendCh)（广播可能仍在并发写）。
+// 关闭状态经 atomic.Pointer 发布：任何路径唤醒 WritePump 后读取都安全。
 func (c *Client) Close(code int, reason string) {
 	c.closeOnce.Do(func() {
-		c.closeCode = code
-		c.closeReason = reason
+		c.closeInfo.Store(&closeState{code: code, reason: reason})
 		c.cancel()
 	})
 }

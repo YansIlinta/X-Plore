@@ -299,6 +299,25 @@ func (a *API) handleRoomDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := a.col.Snapshot()
+	if snap.Mock {
+		// mock 模式：与 /api/rooms 的演示数据保持一致
+		if roomID == "room-1842" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mock": true, "ts": snap.TS, "partial": false,
+				"room": RoomView{RoomID: "room-1842", OnlineCount: 5291, Comets: []string{"comet1:8080"}, Active: true},
+			})
+			return
+		}
+		if roomID == "room-921" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mock": true, "ts": snap.TS, "partial": false,
+				"room": RoomView{RoomID: "room-921", OnlineCount: 3102, Comets: []string{"comet2:8080"}, Active: true},
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mock": true, "ts": snap.TS, "partial": false, "room": nil})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	rooms, failed := a.col.aggregateRooms(ctx, roomID)

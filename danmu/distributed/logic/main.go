@@ -112,16 +112,18 @@ func main() {
 	var kafkaProduceErrs atomic.Int64
 
 	brokers := splitComma(*kafkaBrokers)
+	// 注意：Async 模式下 WriteTimeout 不生效（异步路径不经过写超时），
+	// 失败批次走 ErrorLogger 丢弃并计数；key=roomID 的保序只是 best-effort——
+	// 批次重试失败丢弃后，同房间后到的消息可能先到（有序性有洞）。
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
 		Topic:        *kafkaTopic,
-		Balancer:     &kafka.Hash{}, // key=roomID → 同房间同 partition，保序
+		Balancer:     &kafka.Hash{}, // key=roomID → 同房间同 partition（best-effort 保序）
 		BatchSize:    500,
 		BatchTimeout: 10 * time.Millisecond,
 		Async:        true,
 		RequiredAcks: kafka.RequireOne,
 		MaxAttempts:  3,
-		WriteTimeout: 5 * time.Second,
 		ErrorLogger: kafka.LoggerFunc(func(m string, a ...interface{}) {
 			kafkaProduceErrs.Add(1) // 观测：异步 produce 失败计数
 			log.Printf("[kafka] "+m, a...)
@@ -136,6 +138,9 @@ func main() {
 		kafkaProduceErrs: &kafkaProduceErrs,
 		tracer:           core.NewTraceRecorder(*id, uint32(*traceRate), *traceBuf),
 	}
+	// msg_id 序列用进程启动时刻播种：重启后 seq 归零也不会与旧 msg_id 重复
+	// （前端按 msg_id 去重，跨重启重复会造成已显示过的弹幕再次出现）。
+	ls.msgIDSeq.Store(uint64(time.Now().UnixNano()))
 	srv := grpc.NewServer()
 	pb.RegisterLogicServiceServer(srv, ls)
 
@@ -146,7 +151,9 @@ func main() {
 	log.Printf("[logic] id=%s gRPC listening on %s, kafka topic=%s", *id, *addr, *kafkaTopic)
 
 	go func() {
-		if err := srv.Serve(lis); err != nil {
+		if err := srv.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+			// ErrServerStopped 是 GracefulStop 后的正常返回；误判成致命错误会
+			// log.Fatalf 提前 os.Exit(1)，跳过 defer writer.Close() 丢在途 Kafka 消息
 			log.Fatalf("[logic] serve: %v", err)
 		}
 	}()
