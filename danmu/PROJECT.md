@@ -208,8 +208,6 @@ X-Plore/                          # 仓库根（go module: danmu）
 
 | 路径 | 说明 |
 |------|------|
-| `wavehub/`、`../wavehub/micro/` | 音乐分享平台（Gin / Kratos），面试另一条故事线 |
-| `SPRINT-2DAY.md` | WaveHub 两日冲刺，非弹幕 |
 | `musicviz/`、`Tkcet.go` | 草稿/实验，非交付主线 |
 
 ---
@@ -285,11 +283,10 @@ curl http://localhost:8081/metrics
 | 文档 | 内容 |
 |------|------|
 | **PROJECT.md（本文）** | 统合总览：架构、取舍、启动、边界 |
-| **`INTERVIEW.md`** | 面试口述：60 秒 / 3 分钟稿、追问速答、与 WaveHub 边界 |
+| **`INTERVIEW.md`** | 面试口述：60 秒 / 3 分钟稿、追问速答 |
 | `README.md` | 单体详解、压测剧本、内核调优、排障 |
 | `DESIGN-goim.md` | 微服务拆分契约与数据流 |
 | `REVIEW.md` | 问题清单、修复、压测前后对比 |
-| `SPRINT-2DAY.md` | **WaveHub** 面试冲刺（非弹幕） |
 
 ---
 
@@ -307,16 +304,7 @@ curl http://localhost:8081/metrics
 
 ---
 
-## 11. 视频平台演进（2026-07 起）
+## 11. 视频平台演进（2026-07 起，已归档移除）
 
-产品目标：在弹幕高性能底座上，演进为**可运营的点播站**（类 B 站 MVP）。
-
-| 决策 | 内容 |
-|------|------|
-| MVP | 上传 → HLS 转码 → 播放 + 弹幕绑定稿件 |
-| 业务 | `../wavehub/micro`：user / **video** / media(HLS) |
-| 前端 | `web-app/` React + TypeScript + Vite + hls.js |
-| 依赖 | `deploy/platform/docker-compose.yml` |
-| 房间 | `room_id = strconv.FormatUint(video_id, 10)` |
-
-详见 **[EVOLUTION.md](../wavehub/EVOLUTION.md)**。弹幕主线（本文 1–10 节）仍为连接层与压测叙事核心，不被视频业务替换。
+> 原 WaveHub 点播平台（user/video/media 等 Kratos 微服务 + React 前端）已从仓库移除，
+> 历史内容保留在 git 历史中。本文 1–10 节（连接层与压测叙事）为弹幕主线核心。

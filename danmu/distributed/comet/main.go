@@ -72,7 +72,7 @@ type comet struct {
 	hub        *core.Hub
 	logics     *logicPool
 	authToken  string
-	jwtSecret  string // 与 wavehub-micro user 共享 JWT_SECRET；空则仅 secret 鉴权
+	jwtSecret  string // 业务 JWT 校验密钥（JWT_SECRET）；空则仅 secret 鉴权
 	upgrader   websocket.Upgrader
 	startTime  time.Time
 	uplinkCh   chan uplinkMsg
@@ -282,7 +282,7 @@ func main() {
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		jwtSecret = "dev-only-change-me"
-		log.Println("[WARN] JWT_SECRET not set, using default (align with wavehub-micro user)")
+		log.Println("[WARN] JWT_SECRET not set, using default")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

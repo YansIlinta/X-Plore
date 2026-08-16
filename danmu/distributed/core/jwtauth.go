@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// 业务 JWT 与 wavehub-micro user 服务约定一致：
+// 业务 JWT 约定：
 //   HS256, claims: { "uid": <number>, "exp": <unix_sec> }
 // 用于 comet WS 双模鉴权（与 DANMU_AUTH_TOKEN 压测 secret 并存）。
 
@@ -84,7 +84,7 @@ func VerifyBusinessJWT(token, secret string) (uid string, err error) {
 			return "", ErrJWTExpired
 		}
 	} else {
-		// 无 exp 的 token 永久有效，一律拒绝（wavehub user 签发必带 exp）。
+		// 无 exp 的 token 永久有效，一律拒绝（业务侧签发必带 exp）。
 		return "", ErrJWTMalformed
 	}
 	switch v := claims["uid"].(type) {
