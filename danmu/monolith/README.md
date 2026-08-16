@@ -461,3 +461,21 @@ curl http://localhost:8081/metrics
 - 相关 flag：`-hist-size`（每房间条数，默认 100）、`-hist-ttl`（TTL，默认 5m）。
 - 验收校验：`loadtest -reconnect-check`（发送端持续发消息，接收端断开后带
   `after_seq` 重连，核对补发条数）。
+
+### 跨机广播（Redis 7 sharded Pub/Sub）
+
+默认启用（flag `-redis-sharded=true`，需 Redis ≥7；Dragonfly 亦实现该命令族）：
+
+- **频道方案**：8 个固定复用频道 `danmu0:mux` … `danmu7:mux`（分片键 = 频道名
+  第一个冒号前的部分，Redis sharded Pub/Sub 规则），房间按 `fnv32(roomID)%8`
+  哈希落片，房间维度信息在消息 payload 里。
+- **订阅**：`SSUBSCRIBE` 全部 8 个精确频道——sharded Pub/Sub 不支持 pattern，
+  Redis 侧从「每条消息 × 全量 pattern 匹配」降为精确频道直查。
+- **为什么换**：经典 cluster Pub/Sub 会把每条消息广播到集群所有节点，吞吐随
+  节点数**负向扩展**；sharded 版消息只留在分片所在节点、只投递给订阅者，吞吐
+  随分片数线性扩展。量级参考 Centrifugo 实测（
+  [Scaling Redis Pub/Sub to Millions of Channels, 2026-06-29](https://centrifugal.dev/blog/2026/06/29/scaling-redis-pub-sub)）：
+  单机 ~650k msg/s 上限、经典 cluster Pub/Sub 3 节点即出现秒级延迟、
+  8 shard ~5.2M msg/s。
+- `-redis-sharded=false` 回退经典 `room:{id}` + `PSUBSCRIBE room:*` 路径
+  （两条路径都有单测覆盖；真实 Redis 集成测试：`DANMU_TEST_REDIS=localhost:6379 go test -tags integration ./server/`）。

@@ -21,6 +21,7 @@ func main() {
 	redisAddr := flag.String("redis", "localhost:6379", "Redis address")
 	redisPassword := flag.String("redis-password", "", "Redis password")
 	redisDB := flag.Int("redis-db", 0, "Redis database")
+	redisSharded := flag.Bool("redis-sharded", true, "跨机广播使用 Redis 7 sharded Pub/Sub（SPUBLISH/SSUBSCRIBE）；false 回退经典 Pub/Sub")
 	kafkaBrokers := flag.String("kafka", "localhost:9092", "Kafka brokers (comma separated)")
 	kafkaTopic := flag.String("kafka-topic", "danmu-history", "Kafka topic name")
 	mqMode := flag.String("mq", "both", "MQ mode: redis|kafka|both")
@@ -57,16 +58,16 @@ func main() {
 	go hub.hist.SweepLoop(ctx, time.Minute)
 	go hub.Run()
 
-	// Redis Pub/Sub
+	// Redis Pub/Sub（默认 sharded，需 Redis ≥7；Dragonfly 亦实现该命令族）
 	if *mqMode == "redis" || *mqMode == "both" {
-		redisHub, err := NewRedisHub(*redisAddr, *redisPassword, *redisDB, hub, ctx)
+		redisHub, err := NewRedisHub(*redisAddr, *redisPassword, *redisDB, hub, ctx, defaultShardCount, *redisSharded)
 		if err != nil {
 			log.Printf("[WARN] Redis connection failed: %v, running without Redis", err)
 		} else {
 			hub.redisHub = redisHub
-			// 启动 Redis 模式订阅（订阅所有房间频道）
-			go redisHub.SubscribePattern()
-			log.Println("[main] Redis Pub/Sub enabled")
+			// 启动订阅循环（sharded：订阅全部固定复用频道；经典：订阅 room:* pattern）
+			go redisHub.SubscribeLoop()
+			log.Printf("[main] Redis Pub/Sub enabled (sharded=%v)", *redisSharded)
 			defer redisHub.Close()
 		}
 	}
