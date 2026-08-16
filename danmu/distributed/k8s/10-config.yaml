@@ -1,0 +1,9 @@
+# 非敏感共享配置。DANMU_AUTH_TOKEN / JWT_SECRET 已移到 Secret `danmu-secret`
+# （10-secret.yaml），本文件只留白名单这类非敏感项。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: danmu-env
+  namespace: danmu
+data:
+  WS_ALLOWED_ORIGINS: "*" # 空=允许全部；生产收紧为域名白名单

@@ -1,0 +1,39 @@
+# 可选 Ingress（需集群已有 Ingress Controller，如 ingress-nginx）。
+# 刻意不放进 kustomization.yaml：无 Controller 的集群里 apply 它只是无害悬挂，
+# 但保持「基线 apply 不依赖 Ingress Controller」更干净。有 Controller 时手动部署：
+#   kubectl apply -f k8s/36-ingress.yaml
+# 然后把下面两个 host 换成自己的域名/DNS 记录。
+#
+# WS 长连接：ingress-nginx 透传 Upgrade 头，但必须调大读写超时，否则 60s 默认值
+# 会掐断空闲连接（与裸机 nginx 的 86400s 对应）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: danmu
+  namespace: danmu
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: danmu.example.com # 弹幕 WS/HTTP 入口（→ k8s 内 nginx → comet）
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+    - host: ops.danmu.example.com # Ops Console
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ops
+                port:
+                  number: 7900

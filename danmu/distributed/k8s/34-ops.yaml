@@ -1,0 +1,71 @@
+# ops：旁路观测 Ops Console。不在消息链路上，1 副本即可；经 etcd 发现各实例。
+# 注意：镜像内没有 loadtest 二进制（源码在 ../monolith），Load Test 页显示不可用，
+# 压测从集群外对 comet 做 port-forward 后执行。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops
+  namespace: danmu
+  labels:
+    app: ops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ops
+  template:
+    metadata:
+      labels:
+        app: ops
+    spec:
+      containers:
+        - name: ops
+          image: danmu-distributed:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/ops
+            - -addr=:7900
+            - -etcd=etcd-client:2379
+            - -kafka=kafka:9092
+            - -poll=2s
+          env:
+            - name: DANMU_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: danmu-secret, key: DANMU_AUTH_TOKEN }
+          ports:
+            - name: http
+              containerPort: 7900
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ops
+  namespace: danmu
+  labels:
+    app: ops
+spec:
+  selector:
+    app: ops
+  ports:
+    - name: http
+      port: 7900
+      targetPort: http

@@ -1,0 +1,38 @@
+# consumer：Kafka→ClickHouse 落库（架构无关公共组件，镜像从 ../monolith 构建：
+#   docker build -f ../monolith/Dockerfile.consumer ../monolith -t danmu-consumer:latest）。
+# 无 HTTP 观测面（已知盲区，见 ARCHITECTURE_ANALYSIS.md §3），因此没有探针；
+# 活性靠 danmu-storage 消费组 lag 间接推断。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: danmu
+  labels:
+    app: consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      containers:
+        - name: consumer
+          image: danmu-consumer:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - ./consumer
+            - -kafka=kafka:9092
+            - -topic=danmu-broadcast
+            - -clickhouse-addr=clickhouse:9000
+            - -mode=storage
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

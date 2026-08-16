@@ -1,0 +1,129 @@
+# comet：WebSocket 接入层。无状态，按连接数水平扩缩（HPA CPU 基线）。
+# 关键 K8s 适配：advertise 用 pod IP 注册进 etcd（job 经 etcd 直连各 pod 的 :7500），
+# 因此 comet 不需要 Service 供内部调用；Service 仅为外部 WS 入口（sessionAffinity
+# ClientIP 承担 nginx 之外的一层粘性）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comet
+  namespace: danmu
+  labels:
+    app: comet
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: comet
+  template:
+    metadata:
+      labels:
+        app: comet
+    spec:
+      containers:
+        - name: comet
+          image: danmu-distributed:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/comet
+            - -ws-addr=:8080
+            - -rpc-addr=:7500
+            - -advertise=$(POD_IP):7500
+            - -advertise-http=$(POD_IP):8080
+            - -id=$(POD_NAME)
+            - -etcd=etcd-client:2379
+            - -trace-sample=100
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DANMU_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: danmu-secret, key: DANMU_AUTH_TOKEN }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: danmu-secret, key: JWT_SECRET }
+            - name: WS_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef: { name: danmu-env, key: WS_ALLOWED_ORIGINS }
+          ports:
+            - name: ws
+              containerPort: 8080
+            - name: rpc
+              containerPort: 7500
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ws
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: ws
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comet
+  namespace: danmu
+  labels:
+    app: comet
+spec:
+  selector:
+    app: comet
+  # WS 长连接按客户端 IP 粘到固定 pod（nginx 那层 hash consistent 在单上游时退化为
+  # 直连 ClusterIP，粘性由此处 sessionAffinity 兜底）。
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+  ports:
+    - name: ws
+      port: 8080
+      targetPort: ws
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: comet
+  namespace: danmu
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: comet
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# 接入层至少留 1 个 pod 接流（WS 长连接中断重连代价高）。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: comet
+  namespace: danmu
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: comet

@@ -1,0 +1,97 @@
+# logic：无状态逻辑层，按 CPU 扩。advertise 用 pod IP 注册进 etcd，
+# comet 经 etcd resolver + round_robin 直接发现各 pod，无需 Service。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logic
+  namespace: danmu
+  labels:
+    app: logic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: logic
+  template:
+    metadata:
+      labels:
+        app: logic
+    spec:
+      containers:
+        - name: logic
+          image: danmu-distributed:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/logic
+            - -addr=:7400
+            - -id=$(POD_NAME)
+            - -etcd=etcd-client:2379
+            - -advertise=$(POD_IP):7400
+            - -advertise-http=$(POD_IP):7410
+            - -http-addr=:7410
+            - -kafka=kafka:9092
+            - -trace-sample=100
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: rpc
+              containerPort: 7400
+            - name: http
+              containerPort: 7410
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: logic
+  namespace: danmu
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: logic
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logic
+  namespace: danmu
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: logic

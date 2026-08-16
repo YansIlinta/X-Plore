@@ -1,0 +1,107 @@
+# nginx：WS/HTTP 统一入口（对应 compose 的 :8088）。
+# 与裸机版 nginx.conf 的差异：upstream 只有一个 `comet`（ClusterIP，kube-proxy 分发），
+# hash consistent 在单上游时退化，粘性由 comet Service 的 sessionAffinity: ClientIP 承担。
+# 对外暴露三选一：port-forward / 改 Service 为 NodePort / 集群已有 Ingress Controller 时加 Ingress。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-conf
+  namespace: danmu
+data:
+  nginx.conf: |
+    events {
+        worker_connections 65535;
+    }
+
+    http {
+        map $http_x_forwarded_for $client_identifier {
+            ""      $remote_addr;
+            default $http_x_forwarded_for;
+        }
+
+        upstream comet_servers {
+            hash $client_identifier consistent;
+            server comet:8080;
+        }
+
+        server {
+            listen 80;
+
+            location /ws {
+                proxy_pass http://comet_servers;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_read_timeout 86400s;
+                proxy_send_timeout 86400s;
+            }
+
+            location / {
+                proxy_pass http://comet_servers;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: danmu
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+      volumes:
+        - name: conf
+          configMap:
+            name: nginx-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: danmu
+  labels:
+    app: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

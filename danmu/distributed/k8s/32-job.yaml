@@ -1,0 +1,58 @@
+# job：Kafka 消费扇出层。固定 1 副本：消费组同步提交、at-most-once 语义（弹幕允许丢
+# 但绝不重复），多副本会互相抢分区且不提升单分区吞吐——扩展方式是加 Kafka 分区
+# 再水平扩容，本基线保持 1。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job
+  namespace: danmu
+  labels:
+    app: job
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: job
+  template:
+    metadata:
+      labels:
+        app: job
+    spec:
+      containers:
+        - name: job
+          image: danmu-distributed:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/job
+            - -kafka=kafka:9092
+            - -etcd=etcd-client:2379
+            - -http-addr=:7420
+            - -advertise-http=$(POD_IP):7420
+            - -trace-sample=100
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: http
+              containerPort: 7420
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
