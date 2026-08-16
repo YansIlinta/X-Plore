@@ -42,6 +42,34 @@ bash scripts/run-goim-local.sh        # 或本地进程方式（需本机 Kafka�
 kubectl apply -k k8s/                 # 或 Kubernetes（清单与说明见 k8s/README.md）
 ```
 
+## 测试
+
+两个 Go module 独立，各自跑（需要 Go 1.25+，distributed 会按 go.mod 自动拉取对应 toolchain）：
+
+```bash
+cd danmu/monolith && go build ./... && go vet ./... && go test ./...
+cd danmu/distributed && go build ./... && go vet ./... && go test ./...
+# 竞态检测（monolith 含 WS 端到端与并发用例）
+cd danmu/monolith && go test -race ./server/
+```
+
+覆盖要点：
+
+- **monolith/server**：WS 端到端（发弹幕→同房间接收、敏感词过滤、错误 token 401、管理员广播、会话过期断开）、Hub 分片/顶号/关房/踢人、TokenBucket、消息合并与 UTF-8 截断
+- **distributed**：core（Hub 计数一致性、令牌、令牌桶、trace）、etcdreg（embed etcd 注册/发现/Watch）、comet（etcd resolver + round_robin 负载分摊）、ops（采集聚合/拓扑/事件）、job/comet 的 trace 链路
+- **链路集成**：`danmu/distributed/cmd/chaintest`（需 etcd + logic + comet，见 [DESIGN.md](./danmu/distributed/DESIGN.md)）
+- **ClickHouse 冒烟**：`go test -tags smoke ./consumer/`（需本地 ClickHouse）
+
+## 验证状态
+
+| 路径 | 状态 |
+|------|------|
+| 单体：无中间件降级本机广播（WS 收发闭环） | ✅ 实测 |
+| 分布式：etcd 发现 + Logic.OnMessage + PushRoom→WS + trace | ✅ 实测（chaintest） |
+| Ops Console 聚合与健康判定 | ✅ 实测 |
+| standalone comet 压测（P50 ~0.4ms @ 200 连接） | ✅ 实测 |
+| Kafka 段（logic→Kafka→job 扇出）、Redis 跨机广播、ClickHouse 落库/历史 | ⏳ 需中间件环境（compose / run-goim-local.sh） |
+
 ## 文档地图
 
 | 文档 | 内容 |

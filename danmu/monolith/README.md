@@ -103,7 +103,7 @@ graph TB
 | **Nginx** | WebSocket 负载均衡（`hash $client_identifier consistent`，优先 X-Forwarded-For），HTTP 反向代理 |
 | **弹幕服务器** | WebSocket 长连接管理、消息队列削峰、worker 池批量广播、限流、敏感词过滤、会话续期 |
 | **Hub** | 房间-连接映射管理，256 分片锁（每分片独立 `RWMutex`），避免全局锁竞争 |
-| **Worker Pool** | 固定 `CPU*4` goroutine，批量聚合（1000条/10ms）后广播，减少 syscall |
+| **Worker Pool** | 固定 `CPU*2` goroutine，批量聚合（2000条/20ms，见 `server/worker.go` 的 `batchSize`/`batchTimeout`）后广播，减少 syscall |
 | **Redis Pub/Sub** | 跨机实时广播，频道 `room:{roomId}`，按房间批量 publish，SourceServer 去重 |
 | **Kafka Producer** | 异步批量写入 `danmu-history` topic，按 roomId 分区 |
 | **落库消费组** | 消费 Kafka 写入 ClickHouse（MergeTree），支持水平扩容、自动 rebalance |
@@ -402,7 +402,7 @@ danmu/monolith/          # module github.com/YansIlinta/danmu-monolith
 ## 接口文档
 
 所有 REST 接口前缀 `/api/v1`，鉴权用 `Authorization: Bearer <token>`。
-详见 `api_design_guide.md`。
+（接口文档即本 README 的「快速示例」一节，未单独维护 api_design_guide.md。）
 
 ### 快速示例
 

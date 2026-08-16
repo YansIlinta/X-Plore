@@ -58,7 +58,7 @@
 **数据流要点**：
 
 1. 客户端 WebSocket 上行弹幕 → 入 `msgQueue`（削峰）。
-2. Worker 池批量聚合（约 1000 条 / 10ms）→ 本机 `Hub.BroadcastToRoom`。
+2. Worker 池批量聚合（2000 条 / 20ms，见 `monolith/server/worker.go`）→ 本机 `Hub.BroadcastToRoom`。
 3. 同时：Redis 按房间批量 Pub（跨机实时）+ Kafka Produce（持久化）。
 4. 其他 server 经 Redis Sub 收到后，过滤本机 `SourceServer`，再广播到本机房间连接。
 5. `consumer` 消费 Kafka 写入 ClickHouse；可选给 server 配 ClickHouse 只读以提供 `/api/v1/history`。
@@ -206,11 +206,8 @@ X-Plore/
         ├── docker-compose.goim.yml / nginx.conf
         ├── k8s/                  # K8s 清单（base/ + overlays/etcd-tls）
         └── helm/danmu/           # Helm chart
-├── docker-compose.yml            # 单体 + 中间件
-├── docker-compose.goim.yml       # 微服务全链路
-├── Dockerfile.server / .consumer / .goim
-└── nginx.conf
 ```
+> 注：`docker-compose.yml`、`Dockerfile.*`、`nginx.conf` 分别位于 `monolith/` 与 `distributed/` 目录内（README 顶部「两个 Go module」表已说明），根目录不再放部署文件。
 
 ---
 
