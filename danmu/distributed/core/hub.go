@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 const numShards = 256
@@ -20,6 +21,11 @@ type roomShard struct {
 type Hub struct {
 	shards   [numShards]*roomShard
 	ServerID string
+
+	// connCount/roomCount 原子计数：与分片 map 同步维护，供观测接口 O(1) 读取，
+	// 免掉 GetConnCount/GetRoomCount 的 256 分片扫描。
+	connCount atomic.Int64
+	roomCount atomic.Int64
 
 	// TokenIssuer 用于校验 reauth 令牌（会话续期）。
 	TokenIssuer *TokenIssuer
@@ -64,9 +70,12 @@ func (h *Hub) AddClient(c *Client) {
 	if !ok {
 		room = make(map[string]*Client)
 		shard.rooms[c.RoomID] = room
+		h.roomCount.Add(1) // 新房间
 	}
 	if old, exists := room[c.UID]; exists {
 		old.cancel() // 同 uid 顶号，关旧连接
+	} else {
+		h.connCount.Add(1) // 顶号替换不算新增连接（旧连接走 cancel 退出，不会再 RemoveClient 计数）
 	}
 	room[c.UID] = c
 	MetricConnInc()
@@ -82,8 +91,10 @@ func (h *Hub) RemoveClient(c *Client) {
 	}
 	if existing, exists := room[c.UID]; exists && existing == c {
 		delete(room, c.UID)
+		h.connCount.Add(-1)
 		if len(room) == 0 {
 			delete(shard.rooms, c.RoomID)
+			h.roomCount.Add(-1)
 		}
 	}
 }
@@ -224,3 +235,12 @@ func (h *Hub) GetRoomCount() int {
 	}
 	return count
 }
+
+// OnlineCount 原子计数在线连接数（O(1)，供观测接口用）。
+// 注意：KickClient/CloseRoom 直接删分片条目、不经 RemoveClient，这两条路径下计数会
+// 永久偏高（额度泄漏）； Kick/CloseRoom 是低频管理操作，接受该近似换 stats 接口零扫描。
+// 需要精确值时仍可用 GetConnCount 全扫描。
+func (h *Hub) OnlineCount() int64 { return h.connCount.Load() }
+
+// RoomCountFast 原子计数房间数（O(1)，供观测接口用；近似性同 OnlineCount）。
+func (h *Hub) RoomCountFast() int64 { return h.roomCount.Load() }

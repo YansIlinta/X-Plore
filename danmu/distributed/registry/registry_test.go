@@ -76,3 +76,53 @@ func TestHeartbeatKeepsAlive(t *testing.T) {
 		t.Fatalf("got %v, want 1 alive instance", got)
 	}
 }
+
+// /health 返回 200 + {"status":"ok"}。
+func TestHealth(t *testing.T) {
+	srv := httptest.NewServer(New(time.Second))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("body=%v", body)
+	}
+}
+
+// 无 service 参数时返回全部服务 map；有参数时仍返回数组（向后兼容）。
+func TestListAllServices(t *testing.T) {
+	srv := httptest.NewServer(New(time.Second))
+	defer srv.Close()
+
+	register(t, srv.URL, "Arith", "127.0.0.1:9001")
+	register(t, srv.URL, "Arith", "127.0.0.1:9002")
+	register(t, srv.URL, "Other", "127.0.0.1:9999")
+
+	resp, err := http.Get(srv.URL + "/services")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var all map[string][]string
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || len(all["Arith"]) != 2 || len(all["Other"]) != 1 {
+		t.Fatalf("all=%v", all)
+	}
+
+	// 带参数行为不变：仍是数组
+	if got := list(t, srv.URL, "Arith"); len(got) != 2 {
+		t.Fatalf("got %v", got)
+	}
+}

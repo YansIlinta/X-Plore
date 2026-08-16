@@ -23,11 +23,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
-
-	"minirpc/registry"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/YansIlinta/danmu-distributed/core"
 	"github.com/YansIlinta/danmu-distributed/pb"
+	"github.com/YansIlinta/danmu-distributed/registry"
 )
 
 // uplinkMsg 一条待转发给 Logic 的上行弹幕。
@@ -85,6 +85,8 @@ type comet struct {
 	qpsCount      atomic.Int64
 	lastSecondQPS atomic.Int64
 	droppedUplink atomic.Int64
+
+	tracer *core.TraceRecorder
 }
 
 // PushRoom 是 Job 调用的 gRPC：把一批消息广播给本机该房间的连接。
@@ -93,7 +95,31 @@ func (c *comet) PushRoom(ctx context.Context, req *pb.PushRoomReq) (*pb.PushRoom
 	if delivered > 0 {
 		core.MetricMsgOut(delivered)
 	}
+	// job 把本批命中采样的 msg_id 放在 metadata 里，这里直接记投递结果，
+	// 不必解析 payload。delivered=0 是有意义的信息：本机没有该房间的连接。
+	if c.tracer.Enabled() {
+		if ids := traceIDsFromCtx(ctx); len(ids) > 0 {
+			now := time.Now().UnixNano()
+			detail := "delivered=" + strconv.Itoa(delivered)
+			for _, id := range ids {
+				c.tracer.Record(id, core.HopCometDeliver, req.RoomId, detail, now)
+			}
+		}
+	}
 	return &pb.PushRoomResp{Delivered: int32(delivered)}, nil
+}
+
+// traceIDsFromCtx 从 gRPC metadata 取本批采样的 msg_id 列表。
+func traceIDsFromCtx(ctx context.Context) []string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil
+	}
+	vals := md.Get(core.TraceMetadataKey)
+	if len(vals) == 0 || vals[0] == "" {
+		return nil
+	}
+	return strings.Split(vals[0], ",")
 }
 
 // onUplink 是注入给 hub 的回调：readPump 收到弹幕后非阻塞入队，满则丢弃计数。
@@ -117,7 +143,8 @@ func (c *comet) uplinkWorker() {
 			continue // 无可用 logic，丢弃（弹幕允许丢）
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_, err := client.OnMessage(ctx, &pb.OnMessageReq{
+		start := time.Now()
+		resp, err := client.OnMessage(ctx, &pb.OnMessageReq{
 			RoomId: m.roomID, Uid: m.uid, Content: m.content,
 			ClientTs: m.clientTS, ClientTsNano: m.clientTSN, SourceComet: c.id,
 			OffsetMs: m.offsetMS,
@@ -125,6 +152,14 @@ func (c *comet) uplinkWorker() {
 		cancel()
 		if err != nil {
 			log.Printf("[comet] logic OnMessage error: %v", err)
+			continue
+		}
+		// msg_id 由 logic 生成，所以上行 span 只能等 RPC 返回后补记。
+		// 采样判定用同一套确定性哈希，与 logic 的结论必然一致。
+		if c.tracer.Sampled(resp.MsgId) {
+			c.tracer.Record(resp.MsgId, core.HopCometUplink, m.roomID,
+				"logic_rtt_ms="+strconv.FormatInt(time.Since(start).Milliseconds(), 10),
+				time.Now().UnixNano())
 		}
 	}
 }
@@ -156,8 +191,8 @@ func (c *comet) localBroadcast(m uplinkMsg) {
 
 // handleWebSocket WS 升级入口：鉴权 → 建连 → 注册 → 下发会话令牌。
 // 鉴权双模（M2）：
-//  1) token == DANMU_AUTH_TOKEN → 压测/联调 secret（loadtest 兼容）
-//  2) 否则按业务 JWT（HS256, claim uid）校验；成功则强制用 JWT 内 uid（防冒充）
+//  1. token == DANMU_AUTH_TOKEN → 压测/联调 secret（loadtest 兼容）
+//  2. 否则按业务 JWT（HS256, claim uid）校验；成功则强制用 JWT 内 uid（防冒充）
 func (c *comet) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	roomID := r.URL.Query().Get("room")
@@ -217,11 +252,14 @@ func main() {
 	wsAddr := flag.String("ws-addr", ":8080", "WebSocket/HTTP listen address")
 	rpcAddr := flag.String("rpc-addr", ":7500", "gRPC listen address (Job 调用 PushRoom)")
 	advertise := flag.String("advertise", "", "对外可达的 gRPC 地址(host:port)，默认由 rpc-addr 推导")
+	advertiseHTTP := flag.String("advertise-http", "", "对外可达的 HTTP 观测地址(host:port)，默认由 advertise 主机名 + ws-addr 端口推导")
 	id := flag.String("id", "comet1", "comet instance id")
 	registryURL := flag.String("registry", "", "registry base URL；配置后注册 comet 并发现 logic")
 	logicAddrs := flag.String("logic", "", "logic gRPC 地址静态列表(逗号分隔)；留空则走 registry 发现")
 	pprofAddr := flag.String("pprof", ":6060", "pprof listen address")
 	sessionTTL := flag.Duration("session-ttl", 10*time.Minute, "会话令牌有效期")
+	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
+	traceBuf := flag.Int("trace-buffer", 512, "trace span 环形缓冲条数")
 	flag.Parse()
 
 	core.SessionTTL = *sessionTTL
@@ -258,6 +296,7 @@ func main() {
 		uplinkCh:   make(chan uplinkMsg, 100000),
 		standalone: standalone,
 		filter:     core.NewSensitiveFilter(core.DefaultSensitiveWords),
+		tracer:     core.NewTraceRecorder(*id, uint32(*traceRate), *traceBuf),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -313,6 +352,8 @@ func main() {
 	// 注册到 registry 供 Job 发现（注册的是 gRPC 地址）
 	if *registryURL != "" {
 		go registry.KeepAlive(ctx, *registryURL, "comet", advertiseAddr(*advertise, *rpcAddr), 10*time.Second)
+		// 额外注册 comet-http（HTTP 观测地址），供 Ops Console 经 registry 发现
+		go registry.KeepAlive(ctx, *registryURL, "comet-http", advertiseHTTPAddr(*advertiseHTTP, *advertise, *wsAddr), 10*time.Second)
 	}
 
 	// HTTP/WS server + REST admin
@@ -322,6 +363,7 @@ func main() {
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v1/stats", c.auth(c.handleStats))
 	mux.HandleFunc("/api/v1/rooms", c.auth(c.handleRooms))
+	mux.HandleFunc("/api/v1/traces", c.auth(c.handleTraces))
 	mux.HandleFunc("/api/v1/session-token", c.auth(c.handleSessionToken))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
@@ -353,4 +395,22 @@ func advertiseAddr(advertise, listen string) string {
 		return "localhost" + listen
 	}
 	return listen
+}
+
+// advertiseHTTPAddr 推导 HTTP 观测地址：显式 advertise-http 优先；
+// 否则取 advertise 的主机名 + ws-addr 的端口；advertise 为空则主机名用 localhost。
+func advertiseHTTPAddr(advertiseHTTP, advertise, wsAddr string) string {
+	if advertiseHTTP != "" {
+		return advertiseHTTP
+	}
+	host := "localhost"
+	if advertise != "" {
+		if h, _, err := net.SplitHostPort(advertise); err == nil && h != "" {
+			host = h
+		}
+	}
+	if _, port, err := net.SplitHostPort(wsAddr); err == nil && port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	return host
 }

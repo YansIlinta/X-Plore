@@ -3,6 +3,8 @@
 //
 //	POST /register?service=X&addr=Y   注册/心跳（同一个动作：刷新租约）
 //	GET  /services?service=X          拉取存活地址列表（JSON 数组）
+//	GET  /services                    无 service 参数时返回全部服务 map（观测用）
+//	GET  /health                      {"status":"ok"}（观测端点）
 //
 // 没有"注销"接口——这是有意的：进程崩溃时来不及注销，
 // 所以正确的活性判断只能靠"持续心跳 + 租约过期"，注销接口反而给人虚假安全感。
@@ -35,6 +37,10 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleRegister(w, req)
 	case "/services":
 		r.handleList(w, req)
+	case "/health":
+		// 观测端点：进程活性。registry 自身无外部依赖，活着即健康。
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	default:
 		http.NotFound(w, req)
 	}
@@ -61,6 +67,28 @@ func (r *Registry) handleList(w http.ResponseWriter, req *http.Request) {
 	now := time.Now()
 
 	r.mu.Lock()
+	if service == "" {
+		// 无 service 参数：返回全部服务的存活地址 map，供观测端（Ops Console）枚举。
+		all := make(map[string][]string, len(r.entries))
+		for svc, m := range r.entries {
+			addrs := make([]string, 0, len(m))
+			for addr, expire := range m {
+				if now.After(expire) {
+					delete(m, addr) // 惰性清理（同下）
+					continue
+				}
+				addrs = append(addrs, addr)
+			}
+			if len(addrs) > 0 {
+				sort.Strings(addrs)
+				all[svc] = addrs
+			}
+		}
+		r.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(all)
+		return
+	}
+
 	addrs := make([]string, 0, len(r.entries[service]))
 	for addr, expire := range r.entries[service] {
 		if now.After(expire) {

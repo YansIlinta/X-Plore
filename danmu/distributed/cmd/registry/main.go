@@ -1,4 +1,4 @@
-// registry 是 goim 式架构的服务发现：复用 minirpc/registry（HTTP + 内存 + TTL 租约）。
+// registry 是 goim 式架构的服务发现：`registry` 包的可执行入口（HTTP + 内存 + TTL 租约）。
 // comet/logic 启动时 POST /register 续租，job/comet 通过 GET /services?service=X 发现对端。
 package main
 
@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"minirpc/registry"
+	"github.com/YansIlinta/danmu-distributed/registry"
 )
 
 func main() {

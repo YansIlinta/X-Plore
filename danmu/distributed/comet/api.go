@@ -55,13 +55,22 @@ func (c *comet) startQPSTracker(ctx context.Context) {
 	}()
 }
 
+// handleTraces 返回本机采样到的 trace span，供 ops 汇聚成跨服务链路。
+func (c *comet) handleTraces(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node":  c.id,
+		"stats": c.tracer.Stats(),
+		"spans": c.tracer.Recent(core.TraceLimit(r)),
+	})
+}
+
 func (c *comet) handleStats(w http.ResponseWriter, r *http.Request) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server_id":      c.id,
-		"conn_count":     c.hub.GetConnCount(),
-		"room_count":     c.hub.GetRoomCount(),
+		"conn_count":     c.hub.OnlineCount(), // O(1) 原子计数，替代 256 分片扫描
+		"room_count":     c.hub.RoomCountFast(),
 		"qps":            c.lastSecondQPS.Load(),
 		"dropped_uplink": c.droppedUplink.Load(),
 		"standalone":     c.standalone,

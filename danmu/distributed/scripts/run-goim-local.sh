@@ -20,7 +20,7 @@ export DANMU_AUTH_TOKEN=$TOKEN
 mkdir -p bin logs
 
 if [[ "${1:-}" == "stop" ]]; then
-  pkill -f 'bin/(registry|logic|job|comet)' 2>/dev/null || true
+  pkill -f 'bin/(registry|logic|job|comet|ops)' 2>/dev/null || true
   echo "stopped."
   exit 0
 fi
@@ -30,6 +30,7 @@ go build -o bin/registry ./cmd/registry/
 go build -o bin/logic    ./logic/
 go build -o bin/job      ./job/
 go build -o bin/comet    ./comet/
+go build -o bin/ops      ./cmd/ops/
 
 echo "starting registry..."
 bin/registry -addr=:7350 > logs/registry.log 2>&1 &
@@ -45,10 +46,14 @@ echo "starting comet x2..."
 bin/comet -ws-addr=:8080 -rpc-addr=:7500 -advertise=localhost:7500 -id=comet1 -registry=$REG -pprof=:6060 > logs/comet1.log 2>&1 &
 bin/comet -ws-addr=:8081 -rpc-addr=:7501 -advertise=localhost:7501 -id=comet2 -registry=$REG -pprof=:6061 > logs/comet2.log 2>&1 &
 
+echo "starting ops console..."
+bin/ops -addr=:7900 -registry=$REG -kafka=$KAFKA > logs/ops.log 2>&1 &
+
 sleep 4
 echo "--- registry view ---"
 echo "comet: $(curl -s "$REG/services?service=comet")"
 echo "logic: $(curl -s "$REG/services?service=logic")"
 echo
 echo "链路已启动。WS 入口：ws://localhost:8080 与 ws://localhost:8081"
+echo "Ops Console：http://localhost:7900"
 echo "日志在 logs/，停止：bash scripts/run-goim-local.sh stop"
