@@ -7,7 +7,6 @@
 *.exe
 **/bin/
 bin-linux/
-wavehub/web-app/dist/
 danmu/*/logs/
 danmu/*/etcd-data/
 
