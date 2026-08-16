@@ -16,3 +16,9 @@ node_modules/
 
 # etcd TLS 证书（本地生成，勿提交）
 danmu/distributed/k8s/tls/certs/
+
+# claim-agent 是独立 git 仓库（见 claim-agent/README.md），不由本仓库跟踪
+claim-agent/
+
+# claim-agent-codex 同理（另一套独立 agent 工作区）
+claim-agent-codex/

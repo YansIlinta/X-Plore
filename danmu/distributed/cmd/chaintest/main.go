@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -22,7 +23,9 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
+	"github.com/YansIlinta/danmu-distributed/core"
 	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/pb"
 )
@@ -180,12 +183,94 @@ func main() {
 		return nil
 	})
 
+	step("PushRoom 带 trace metadata → comet 记录 comet.deliver span", func() error {
+		room := "trace-room"
+		// 1) 建 WS 连接进房，保证 PushRoom 有投递对象
+		wsURL := fmt.Sprintf("ws://%s/ws?uid=traceclient&room=%s&token=%s", *cometWS, room, *token)
+		ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			return fmt.Errorf("ws dial: %w", err)
+		}
+		defer ws.Close()
+		time.Sleep(300 * time.Millisecond) // 等 AddClient 完成
+
+		// 2) 模拟 job：带 danmu-trace-msgids metadata 调 PushRoom
+		conn, err := grpc.NewClient(*cometRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		cli := pb.NewCometServiceClient(conn)
+		traceID := "trace-smoke-1"
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		ctx = metadata.AppendToOutgoingContext(ctx, core.TraceMetadataKey, traceID)
+		payload := []byte(`[{"type":"danmu","msg_id":"` + traceID + `","room_id":"` + room + `","uid":"sysu","content":"trace"}]`)
+		resp, err := cli.PushRoom(ctx, &pb.PushRoomReq{RoomId: room, Payload: payload})
+		if err != nil {
+			return fmt.Errorf("PushRoom: %w", err)
+		}
+		if resp.Delivered < 1 {
+			return fmt.Errorf("PushRoom delivered=%d，期望≥1", resp.Delivered)
+		}
+
+		// 3) 轮询 comet /api/v1/traces，该 msg_id 应出现 comet.deliver span
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				return fmt.Errorf("3s 内 comet 未记录 %s 的 %s span", traceID, core.HopCometDeliver)
+			default:
+			}
+			spans, err := fetchTraceSpans(*cometWS, *token)
+			if err != nil {
+				return err
+			}
+			for _, sp := range spans {
+				if sp.MsgID == traceID && sp.Hop == core.HopCometDeliver {
+					fmt.Printf("    %s span: node=%s detail=%q\n", traceID, sp.Node, sp.Detail)
+					return nil
+				}
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+
 	fmt.Println()
 	if fails > 0 {
 		fmt.Printf("FAILED: %d 项未通过\n", fails)
 		os.Exit(1)
 	}
 	fmt.Println("ALL PASSED ✓")
+}
+
+// traceSpan 是 /api/v1/traces 返回的 span 中 chaintest 关心的字段。
+type traceSpan struct {
+	MsgID  string `json:"msg_id"`
+	Hop    string `json:"hop"`
+	Node   string `json:"node"`
+	Detail string `json:"detail"`
+}
+
+// fetchTraceSpans 拉取 comet 的 span 列表（观测端点要求 Bearer token）。
+func fetchTraceSpans(hostPort, token string) ([]traceSpan, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+hostPort+"/api/v1/traces", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Spans []traceSpan `json:"spans"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Spans, nil
 }
 
 // scrapeCounter 从 /metrics 抓一个精确匹配的计数器值。

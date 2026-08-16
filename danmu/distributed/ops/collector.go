@@ -307,7 +307,7 @@ type probeTarget struct {
 }
 
 // probeServices 并发探测各 *-http 实例，聚合为按逻辑组件的 Service 列表。
-// rpcAddrOf 用主机名把 comet-http ↔ comet、logic-http ↔ logic 对上。
+// takeAddr 把 comet-http ↔ comet、logic-http ↔ logic 按主机名（同主机按序）对上。
 func (c *Collector) probeServices(all map[string][]string) []Service {
 	var targets []probeTarget
 	for _, comp := range []string{"comet", "logic", "job"} {
@@ -315,8 +315,15 @@ func (c *Collector) probeServices(all map[string][]string) []Service {
 		rpcAddrs := all[comp]
 		sort.Strings(httpAddrs)
 		sort.Strings(rpcAddrs)
+		// 同主机多实例（本地多 comet 都注册 localhost）时按序配对，不能只按主机名取第一个。
+		pool := map[string][]string{}
+		for _, r := range rpcAddrs {
+			if h, _, err := net.SplitHostPort(r); err == nil {
+				pool[h] = append(pool[h], r)
+			}
+		}
 		for _, h := range httpAddrs {
-			targets = append(targets, probeTarget{comp, h, rpcAddrOf(h, rpcAddrs)})
+			targets = append(targets, probeTarget{comp, h, takeAddr(h, pool)})
 		}
 	}
 
@@ -361,18 +368,19 @@ func (c *Collector) probeServices(all map[string][]string) []Service {
 	return out
 }
 
-// rpcAddrOf 按主机名把 HTTP 观测地址与 RPC 地址对上（如 comet1:8080 ↔ comet1:7500）。
-func rpcAddrOf(httpAddr string, rpcAddrs []string) string {
+// takeAddr 从 pool 里取出与 httpAddr 同主机的下一个 RPC 地址：
+// 不同主机直接按主机名对上；同主机多实例按注册顺序依次配对，取完即删。
+func takeAddr(httpAddr string, pool map[string][]string) string {
 	host, _, err := net.SplitHostPort(httpAddr)
 	if err != nil {
 		return ""
 	}
-	for _, r := range rpcAddrs {
-		if h, _, err := net.SplitHostPort(r); err == nil && h == host {
-			return r
-		}
+	list := pool[host]
+	if len(list) == 0 {
+		return ""
 	}
-	return ""
+	pool[host] = list[1:]
+	return list[0]
 }
 
 // probeInstance 探测单个实例：/health 判活，/api/v1/stats 取原始 JSON，
@@ -520,16 +528,16 @@ func (c *Collector) cometRates(httpAddr string) (*float64, *float64) {
 			}
 		}
 	}
-	now := time.Now()
+	cur.ts = time.Now()
 
 	c.mu.Lock()
 	prev, ok := c.prevCounts[httpAddr]
 	c.prevCounts[httpAddr] = cur
 	c.mu.Unlock()
-	if !ok || now.Sub(prev.ts) <= 0 {
+	if !ok || cur.ts.Sub(prev.ts) <= 0 {
 		return nil, nil // 首轮采样，无速率
 	}
-	dt := now.Sub(prev.ts).Seconds()
+	dt := cur.ts.Sub(prev.ts).Seconds()
 	inRate, outRate := (cur.in-prev.in)/dt, (cur.out-prev.out)/dt
 	if inRate < 0 || outRate < 0 {
 		return nil, nil // 计数器重置（进程重启），本轮不作数
