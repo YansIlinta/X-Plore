@@ -7,7 +7,6 @@ X-Plore/
 ├── danmu/                    百万 QPS 直播弹幕系统
 │   ├── monolith/             单体：一个 server 进程 = 接入 + 逻辑 + 广播
 │   └── distributed/          分布式：goim 式 Comet / Logic / Job + etcd
-└── musicviz/                 SoundCanvas 本地音乐可视化（仅设计稿，未开工）
 ```
 
 ## 主线
