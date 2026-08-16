@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 
 	"github.com/YansIlinta/danmu-distributed/core"
@@ -200,10 +199,7 @@ func main() {
 	if *etcdEndpoints != "" {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		cli, err := clientv3.New(clientv3.Config{
-			Endpoints:   strings.Split(*etcdEndpoints, ","),
-			DialTimeout: 3 * time.Second,
-		})
+		cli, err := etcdreg.NewClient(strings.Split(*etcdEndpoints, ","), etcdreg.TLSFilesFromEnv())
 		if err != nil {
 			log.Fatalf("[logic] etcd client: %v", err)
 		}

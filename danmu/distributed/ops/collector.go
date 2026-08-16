@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
-	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/YansIlinta/danmu-distributed/etcdreg"
 )
@@ -40,7 +39,8 @@ const (
 
 // Config 是 Collector 的构造参数（由 cmd/ops 的 flags 映射而来）。
 type Config struct {
-	EtcdEndpoints []string // etcd 客户端端点（如 localhost:2379）
+	EtcdEndpoints []string         // etcd 客户端端点（如 localhost:2379）
+	EtcdTLS       etcdreg.TLSFiles // 可选 TLS；CAFile 空 = 明文
 	// Discover 是服务发现函数（测试注入用）；nil 时默认用 EtcdEndpoints 建 etcd 客户端。
 	Discover     func(ctx context.Context) (map[string][]string, error)
 	Token        string        // comet /api/v1/stats 的 Bearer token（DANMU_AUTH_TOKEN）
@@ -170,10 +170,7 @@ func NewCollector(cfg Config) *Collector {
 	if cfg.Discover != nil {
 		c.discover = cfg.Discover
 	} else {
-		etcdCli, err := clientv3.New(clientv3.Config{
-			Endpoints:   cfg.EtcdEndpoints,
-			DialTimeout: 3 * time.Second,
-		})
+		etcdCli, err := etcdreg.NewClient(cfg.EtcdEndpoints, cfg.EtcdTLS)
 		if err != nil {
 			log.Printf("[ops] etcd client: %v", err)
 			c.discover = func(context.Context) (map[string][]string, error) { return nil, err }

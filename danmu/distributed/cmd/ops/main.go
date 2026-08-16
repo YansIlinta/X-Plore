@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/YansIlinta/danmu-distributed/etcdreg"
 	"github.com/YansIlinta/danmu-distributed/ops"
 	web "github.com/YansIlinta/danmu-distributed/ops/web"
 )
@@ -39,6 +40,7 @@ func main() {
 
 	col := ops.NewCollector(ops.Config{
 		EtcdEndpoints: strings.Split(*etcdEndpoints, ","),
+		EtcdTLS:       etcdreg.TLSFilesFromEnv(),
 		Token:         *token,
 		KafkaBrokers:  *kafkaBrokers,
 		KafkaTopic:    *kafkaTopic,

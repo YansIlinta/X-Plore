@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -176,10 +175,7 @@ func main() {
 
 	pool := newCometPool()
 	// comet 地址集合由 etcd watch 驱动：增删即重建连接池，无需轮询。
-	etcdCli, err := clientv3.New(clientv3.Config{
-		Endpoints:   strings.Split(*etcdEndpoints, ","),
-		DialTimeout: 3 * time.Second,
-	})
+	etcdCli, err := etcdreg.NewClient(strings.Split(*etcdEndpoints, ","), etcdreg.TLSFilesFromEnv())
 	if err != nil {
 		log.Fatalf("[job] etcd client: %v", err)
 	}

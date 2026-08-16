@@ -293,12 +293,10 @@ func main() {
 	standalone := *etcdEndpoints == ""
 
 	// etcd 客户端：既用于注册自身（comet/comet-http），也用于 logic 的发现（resolver）。
+	// TLS 由 env DANMU_ETCD_* 按需开启（k8s/overlays/etcd-tls），明文基线不受影响。
 	var etcdCli *clientv3.Client
 	if !standalone {
-		cli, err := clientv3.New(clientv3.Config{
-			Endpoints:   strings.Split(*etcdEndpoints, ","),
-			DialTimeout: 3 * time.Second,
-		})
+		cli, err := etcdreg.NewClient(strings.Split(*etcdEndpoints, ","), etcdreg.TLSFilesFromEnv())
 		if err != nil {
 			log.Fatalf("[comet] etcd client: %v", err)
 		}
