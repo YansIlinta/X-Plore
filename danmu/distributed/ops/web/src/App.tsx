@@ -3,11 +3,23 @@ import { usePoll, api, Health } from "./api";
 import Overview from "./pages/Overview";
 import Topology from "./pages/Topology";
 import Services from "./pages/Services";
+import Traffic from "./pages/Traffic";
+import Rooms from "./pages/Rooms";
+import KafkaPage from "./pages/Kafka";
+import Messages from "./pages/Messages";
+import LoadTest from "./pages/LoadTest";
+import EventsPage from "./pages/Events";
 
 // 轻量 hash 路由：页面少，不引入 react-router。
 const PAGES: { path: string; label: string; indent?: boolean }[] = [
   { path: "overview", label: "Overview" },
   { path: "topology", label: "Topology" },
+  { path: "traffic", label: "Traffic" },
+  { path: "rooms", label: "Rooms" },
+  { path: "kafka", label: "Kafka" },
+  { path: "messages", label: "Messages" },
+  { path: "loadtest", label: "Load Test" },
+  { path: "events", label: "Events" },
   { path: "services", label: "Services" },
   { path: "services/comet", label: "Comet", indent: true },
   { path: "services/logic", label: "Logic", indent: true },
@@ -44,6 +56,12 @@ export default function App() {
   let page: React.ReactNode;
   if (route === "overview") page = <Overview />;
   else if (route === "topology") page = <Topology />;
+  else if (route === "traffic") page = <Traffic />;
+  else if (route === "rooms") page = <Rooms />;
+  else if (route === "kafka") page = <KafkaPage />;
+  else if (route === "messages") page = <Messages />;
+  else if (route === "loadtest") page = <LoadTest />;
+  else if (route === "events") page = <EventsPage />;
   else if (route === "services") page = <Services />;
   else if (route.startsWith("services/")) page = <Services component={route.split("/")[1]} />;
   else page = <div className="hint">404: {route}</div>;

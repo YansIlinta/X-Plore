@@ -231,6 +231,22 @@ pre.json-dump {
   max-height: 260px;
 }
 
+button.btn {
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--cyan);
+  border-radius: 4px;
+  padding: 8px 18px;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+}
+button.btn:hover:not(:disabled) { background: #1e2930; }
+button.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+button.btn.danger { border-color: var(--red); color: var(--red); }
+button.btn.danger:hover:not(:disabled) { background: #2a1415; }
+
 .hint { color: var(--text-faint); font-size: 12px; padding: 14px; }
 
 /* ---- Topology ---- */
