@@ -136,6 +136,9 @@ func main() {
 		kafkaProduceErrs: &kafkaProduceErrs,
 		tracer:           core.NewTraceRecorder(*id, uint32(*traceRate), *traceBuf),
 	}
+	// msg_id 序列用进程启动时刻播种：重启后 seq 归零也不会与旧 msg_id 重复
+	// （前端按 msg_id 去重，跨重启重复会造成已显示过的弹幕再次出现）。
+	ls.msgIDSeq.Store(uint64(time.Now().UnixNano()))
 	srv := grpc.NewServer()
 	pb.RegisterLogicServiceServer(srv, ls)
 
@@ -146,7 +149,9 @@ func main() {
 	log.Printf("[logic] id=%s gRPC listening on %s, kafka topic=%s", *id, *addr, *kafkaTopic)
 
 	go func() {
-		if err := srv.Serve(lis); err != nil {
+		if err := srv.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+			// ErrServerStopped 是 GracefulStop 后的正常返回；误判成致命错误会
+			// log.Fatalf 提前 os.Exit(1)，跳过 defer writer.Close() 丢在途 Kafka 消息
 			log.Fatalf("[logic] serve: %v", err)
 		}
 	}()

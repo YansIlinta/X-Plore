@@ -256,7 +256,7 @@ func main() {
 	id := flag.String("id", "comet1", "comet instance id")
 	registryURL := flag.String("registry", "", "registry base URL；配置后注册 comet 并发现 logic")
 	logicAddrs := flag.String("logic", "", "logic gRPC 地址静态列表(逗号分隔)；留空则走 registry 发现")
-	pprofAddr := flag.String("pprof", ":6060", "pprof listen address")
+	pprofAddr := flag.String("pprof", "", "pprof listen address；默认空=关闭（生产勿开，会暴露运行时信息）")
 	sessionTTL := flag.Duration("session-ttl", 10*time.Minute, "会话令牌有效期")
 	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
 	traceBuf := flag.Int("trace-buffer", 512, "trace span 环形缓冲条数")
@@ -303,6 +303,8 @@ func main() {
 			CheckOrigin:     makeCheckOrigin(os.Getenv("WS_ALLOWED_ORIGINS")),
 		},
 	}
+	// msg_id 序列用进程启动时刻播种：standalone 模式下重启后 seq 归零也不会与旧 msg_id 重复。
+	c.msgIDSeq.Store(uint64(time.Now().UnixNano()))
 	log.Printf("[comet] WS auth: secret=%q + business JWT (JWT_SECRET set)", maskSecret(authToken))
 	if o := os.Getenv("WS_ALLOWED_ORIGINS"); o != "" {
 		log.Printf("[comet] WS CheckOrigin whitelist=%s", o)
@@ -344,7 +346,8 @@ func main() {
 		log.Fatalf("[comet] rpc listen: %v", err)
 	}
 	go func() {
-		if err := grpcSrv.Serve(rpcLis); err != nil {
+		if err := grpcSrv.Serve(rpcLis); err != nil && err != grpc.ErrServerStopped {
+			// ErrServerStopped 是 GracefulStop 后的正常返回，不能当致命错误（同 logic）
 			log.Fatalf("[comet] rpc serve: %v", err)
 		}
 	}()
@@ -374,7 +377,13 @@ func main() {
 			log.Fatalf("[comet] http serve: %v", err)
 		}
 	}()
-	go func() { http.ListenAndServe(*pprofAddr, nil) }()
+	if *pprofAddr != "" {
+		go func() {
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				log.Printf("[comet] pprof serve: %v", err)
+			}
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

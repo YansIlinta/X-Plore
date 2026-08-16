@@ -51,7 +51,7 @@ func main() {
 	defer stop()
 	col.Run(ctx)
 
-	lt := ops.NewLoadtestManager(*loadtestBin, *token)
+	lt := ops.NewLoadtestManager(*loadtestBin, *token, ctx)
 	if !*mock {
 		if st := lt.Status(); st["available"] == false {
 			log.Printf("[ops] loadtest binary unavailable (%s): Load Test 页将显示不可用", *loadtestBin)

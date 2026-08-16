@@ -1,11 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
-
-	"encoding/json"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -102,8 +102,12 @@ func (p *logicPool) empty() bool {
 	return len(p.clients) == 0
 }
 
+// httpClient 带超时：registry 不可达时 refresh 必须在几秒内失败返回，
+// 否则 3s 一次的 refresh tick 会堆积卡死的 goroutine。
+var httpClient = &http.Client{Timeout: 5 * time.Second}
+
 func fetchService(registryURL, service string) ([]string, error) {
-	resp, err := http.Get(registryURL + "/services?service=" + service)
+	resp, err := httpClient.Get(registryURL + "/services?service=" + service)
 	if err != nil {
 		return nil, err
 	}

@@ -73,7 +73,9 @@ func (h *Hub) AddClient(c *Client) {
 		h.roomCount.Add(1) // 新房间
 	}
 	if old, exists := room[c.UID]; exists {
-		old.cancel() // 同 uid 顶号，关旧连接
+		// 同 uid 顶号：用明确的关闭码关旧连接（bare cancel 会让 WritePump 误报
+		// "server shutting down"），新连接顶替其位置。
+		old.Close(4009, "session replaced by new connection")
 	} else {
 		h.connCount.Add(1) // 顶号替换不算新增连接（旧连接走 cancel 退出，不会再 RemoveClient 计数）
 	}
@@ -172,6 +174,9 @@ func (h *Hub) GetRoomClients(roomID string) ([]string, bool) {
 	return uids, true
 }
 
+// 注意：CloseRoom/KickClient 直接删分片条目，被关连接的 ReadPump 退出时会调
+// RemoveClient，但那时条目已不存在，RemoveClient 会 early return 不再递减——
+// 所以这里的原子计数必须在此同步递减，否则 OnlineCount/RoomCountFast 永久偏高。
 func (h *Hub) CloseRoom(roomID string) bool {
 	shard := h.shardFor(roomID)
 	shard.mu.Lock()
@@ -185,6 +190,8 @@ func (h *Hub) CloseRoom(roomID string) bool {
 		clients = append(clients, c)
 	}
 	delete(shard.rooms, roomID)
+	h.connCount.Add(-int64(len(clients)))
+	h.roomCount.Add(-1)
 	shard.mu.Unlock()
 	for _, c := range clients {
 		c.Close(4001, "room closed")
@@ -206,8 +213,10 @@ func (h *Hub) KickClient(roomID, uid string) bool {
 		return false
 	}
 	delete(room, uid)
+	h.connCount.Add(-1)
 	if len(room) == 0 {
 		delete(shard.rooms, roomID)
+		h.roomCount.Add(-1)
 	}
 	shard.mu.Unlock()
 	c.Close(4001, "kicked")
@@ -237,10 +246,9 @@ func (h *Hub) GetRoomCount() int {
 }
 
 // OnlineCount 原子计数在线连接数（O(1)，供观测接口用）。
-// 注意：KickClient/CloseRoom 直接删分片条目、不经 RemoveClient，这两条路径下计数会
-// 永久偏高（额度泄漏）； Kick/CloseRoom 是低频管理操作，接受该近似换 stats 接口零扫描。
-// 需要精确值时仍可用 GetConnCount 全扫描。
+// 与分片 map 同步维护：AddClient/RemoveClient/CloseRoom/KickClient 均已配套递减。
+// 需要精确值时仍可用 GetConnCount 全扫描（两者应一致）。
 func (h *Hub) OnlineCount() int64 { return h.connCount.Load() }
 
-// RoomCountFast 原子计数房间数（O(1)，供观测接口用；近似性同 OnlineCount）。
+// RoomCountFast 原子计数房间数（O(1)，供观测接口用；与分片 map 同步维护）。
 func (h *Hub) RoomCountFast() int64 { return h.roomCount.Load() }

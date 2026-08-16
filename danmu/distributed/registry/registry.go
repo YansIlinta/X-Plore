@@ -47,6 +47,10 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Registry) handleRegister(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
 	service, addr := req.FormValue("service"), req.FormValue("addr")
 	if service == "" || addr == "" {
 		http.Error(w, "service and addr required", http.StatusBadRequest)
@@ -82,6 +86,8 @@ func (r *Registry) handleList(w http.ResponseWriter, req *http.Request) {
 			if len(addrs) > 0 {
 				sort.Strings(addrs)
 				all[svc] = addrs
+			} else if len(m) == 0 {
+				delete(r.entries, svc) // 全部过期：连 service 键一起清掉，避免空 map 残留
 			}
 		}
 		r.mu.Unlock()
@@ -89,14 +95,18 @@ func (r *Registry) handleList(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	addrs := make([]string, 0, len(r.entries[service]))
-	for addr, expire := range r.entries[service] {
+	m := r.entries[service]
+	addrs := make([]string, 0, len(m))
+	for addr, expire := range m {
 		if now.After(expire) {
 			// 惰性清理：读的时候顺手删过期条目，省掉后台清理 goroutine
-			delete(r.entries[service], addr)
+			delete(m, addr)
 			continue
 		}
 		addrs = append(addrs, addr)
+	}
+	if len(m) == 0 {
+		delete(r.entries, service) // 全部过期：清掉空 map，防止 service 键无限累积
 	}
 	r.mu.Unlock()
 
@@ -107,8 +117,13 @@ func (r *Registry) handleList(w http.ResponseWriter, req *http.Request) {
 // KeepAlive 立刻注册 addr，然后以 ttl/3 的间隔持续续租，直到 ctx 取消。
 // 间隔取 ttl/3 而不是贴着 ttl：网络抖动丢一两次心跳，租约也还没过期。
 func KeepAlive(ctx context.Context, registryURL, service, addr string, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = 10 * time.Second // 防 time.NewTicker(<=0) panic
+	}
+	// 带超时的 client：registry 挂掉时心跳调用必须快速失败，不能卡死续租 goroutine。
+	client := &http.Client{Timeout: 5 * time.Second}
 	register := func() {
-		resp, err := http.PostForm(registryURL+"/register",
+		resp, err := client.PostForm(registryURL+"/register",
 			url.Values{"service": {service}, "addr": {addr}})
 		if err == nil {
 			resp.Body.Close()

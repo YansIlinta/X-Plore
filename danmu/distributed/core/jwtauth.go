@@ -73,10 +73,19 @@ func VerifyBusinessJWT(token, secret string) (uid string, err error) {
 			expUnix = int64(v)
 		case json.Number:
 			expUnix, _ = v.Int64()
+		default:
+			return "", ErrJWTMalformed // exp 非数值：格式非法
 		}
-		if expUnix > 0 && time.Now().Unix() > expUnix {
+		if expUnix <= 0 {
+			// 覆盖 float64→int64 溢出（如 exp=1e300 → MinInt64）与 0/负值：一律拒绝
+			return "", ErrJWTMalformed
+		}
+		if time.Now().Unix() > expUnix {
 			return "", ErrJWTExpired
 		}
+	} else {
+		// 无 exp 的 token 永久有效，一律拒绝（wavehub user 签发必带 exp）。
+		return "", ErrJWTMalformed
 	}
 	switch v := claims["uid"].(type) {
 	case float64:
