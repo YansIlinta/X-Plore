@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -156,6 +157,7 @@ func main() {
 	pprofAddr := flag.String("pprof", ":6061", "pprof listen address")
 	outputJSON := flag.String("output-json", "", "Output JSON report to file")
 	outputCSV := flag.String("output-csv", "", "Output CSV report to file")
+	reconnectCheck := flag.Bool("reconnect-check", false, "运行重连补发校验（单连接短场景）：校验通过/失败后退出")
 	flag.Parse()
 
 	serverList := strings.Split(*servers, ",")
@@ -178,6 +180,15 @@ func main() {
 		log.Println("[loadtest] shutdown signal")
 		cancel()
 	}()
+
+	// 重连补发校验模式：验证服务端「热历史 + after_seq 缺口补发」的验收场景
+	if *reconnectCheck {
+		if err := runReconnectCheck(serverList[0], *token); err != nil {
+			log.Fatalf("[reconnect-check] FAIL: %v", err)
+		}
+		log.Println("[reconnect-check] PASS")
+		return
+	}
 
 	// 每秒打印指标
 	var snapshots []Snapshot
@@ -288,6 +299,141 @@ waitDone:
 	if *outputCSV != "" {
 		exportCSV(*outputCSV, snapshots)
 	}
+}
+
+// runReconnectCheck 校验服务端「热历史 + 断线补发」：
+// 发送端 A 以固定节奏发 K 条，接收端 B 以「读空闲 600ms」为排空判据收完并记录
+// lastSeq 后断开；A 再发 M 条（B 缺席）；B 带 after_seq=lastSeq 重连，
+// 核对 replay_done.recovered == M。
+// 注：发送与读取完全解耦（不因读到控制帧而补发），避免多发消息污染期望值。
+func runReconnectCheck(serverURL, token string) error {
+	const room = "room-reconnect-check"
+	wsURL := func(uid string) string {
+		return fmt.Sprintf("%s/ws?uid=%s&room=%s&token=%s", serverURL, uid, room, token)
+	}
+	send := func(c *websocket.Conn, content string) error {
+		payload, _ := json.Marshal(map[string]any{
+			"type": "danmu", "content": content, "client_ts": time.Now().UnixMilli(),
+		})
+		return c.WriteMessage(websocket.TextMessage, payload)
+	}
+
+	// A：发送端（独立 uid，避免与 B 同 uid 顶号）
+	a, _, err := websocket.DefaultDialer.Dial(wsURL("rc-sender"), nil)
+	if err != nil {
+		return fmt.Errorf("sender dial: %w", err)
+	}
+	defer a.Close()
+	// A 自己也会收到广播，后台读走避免缓冲堆积
+	go func() {
+		for {
+			if _, _, err := a.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// B：接收端
+	b, _, err := websocket.DefaultDialer.Dial(wsURL("rc-recv"), nil)
+	if err != nil {
+		return fmt.Errorf("recv dial: %w", err)
+	}
+	time.Sleep(200 * time.Millisecond) // 等注册完成
+
+	// phase1：A 固定发 K 条，B 读到空闲为止
+	const k, m = 6, 4
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		for i := 0; i < k; i++ {
+			if err := send(a, fmt.Sprintf("k-%d", i)); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	var lastSeq uint64
+	seen := 0
+	b.SetReadDeadline(time.Now().Add(600 * time.Millisecond))
+	for {
+		_, data, err := b.ReadMessage()
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				break // 600ms 无消息，视为已排空
+			}
+			b.Close()
+			return fmt.Errorf("recv read: %w", err)
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(data, &msgs); err != nil {
+			b.SetReadDeadline(time.Now().Add(600 * time.Millisecond))
+			continue
+		}
+		for _, msg := range msgs {
+			if msg["type"] != "danmu" {
+				continue
+			}
+			seen++
+			if seq, ok := msg["seq"].(float64); ok && uint64(seq) > lastSeq {
+				lastSeq = uint64(seq)
+			}
+		}
+		b.SetReadDeadline(time.Now().Add(600 * time.Millisecond))
+	}
+	<-sendDone
+	if seen < k {
+		b.Close()
+		return fmt.Errorf("phase1: received=%d < sent=%d", seen, k)
+	}
+	log.Printf("[reconnect-check] phase1 done: received=%d lastSeq=%d", seen, lastSeq)
+
+	// B 断开，A 继续发 M 条（B 缺席，消息只进服务端热历史）
+	b.Close()
+	for i := 0; i < m; i++ {
+		if err := send(a, fmt.Sprintf("m-%d", i)); err != nil {
+			return fmt.Errorf("sender write: %w", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // 等 worker flush 与热历史落定
+
+	// B 重连（同 uid），带 after_seq=lastSeq 请求补发
+	b2, _, err := websocket.DefaultDialer.Dial(wsURL("rc-recv"), nil)
+	if err != nil {
+		return fmt.Errorf("recv redial: %w", err)
+	}
+	defer b2.Close()
+	b2.SetReadDeadline(time.Now().Add(30 * time.Second))
+	time.Sleep(200 * time.Millisecond) // 等注册完成
+	if err := b2.WriteMessage(websocket.TextMessage,
+		[]byte(fmt.Sprintf(`{"type":"reconnect","after_seq":%d}`, lastSeq))); err != nil {
+		return fmt.Errorf("reconnect send: %w", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, data, err := b2.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("recv read: %w", err)
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(data, &msgs); err != nil {
+			continue
+		}
+		for _, msg := range msgs {
+			if msg["type"] != "replay_done" {
+				continue
+			}
+			recovered := int(msg["recovered"].(float64))
+			if recovered != m {
+				return fmt.Errorf("recovered=%d, want %d", recovered, m)
+			}
+			log.Printf("[reconnect-check] recovered=%d == expected %d", recovered, m)
+			return nil
+		}
+	}
+	return fmt.Errorf("timeout waiting replay_done")
 }
 
 // runClient 单个压测连接

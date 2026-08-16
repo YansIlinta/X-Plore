@@ -30,6 +30,8 @@ func main() {
 	chDatabase := flag.String("clickhouse-db", "default", "ClickHouse database")
 	chUser := flag.String("clickhouse-user", "default", "ClickHouse username")
 	chPassword := flag.String("clickhouse-password", "", "ClickHouse password")
+	histSize := flag.Int("hist-size", 100, "每房间热历史条数（断线重连补发/进房拉最近 N 条）")
+	histTTL := flag.Duration("hist-ttl", 5*time.Minute, "热历史 TTL，超时未写入视为新会话")
 	flag.Parse()
 
 	// 在启动任何连接前设置会话 TTL（运行期只读）
@@ -51,6 +53,8 @@ func main() {
 	// Hub
 	hub := NewHub(*serverID, *mqMode, ctx, cancel)
 	hub.tokenIssuer = NewTokenIssuer(authToken)
+	hub.hist = NewRoomHist(*histSize, *histTTL)
+	go hub.hist.SweepLoop(ctx, time.Minute)
 	go hub.Run()
 
 	// Redis Pub/Sub

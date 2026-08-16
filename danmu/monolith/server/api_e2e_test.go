@@ -72,7 +72,7 @@ func readDanmu(t *testing.T, ws *websocket.Conn) map[string]any {
 		}
 		for _, m := range msgs {
 			switch m["type"] {
-			case "session_token", "reauth_ack", "rate_limited":
+			case "session_token", "reauth_ack", "rate_limited", "replay_done":
 				continue
 			}
 			return m
@@ -249,5 +249,137 @@ func TestRoomListPagination(t *testing.T) {
 	}
 	if body.Total != 2 {
 		t.Fatalf("rooms total = %d, want 2", body.Total)
+	}
+}
+
+// TestWSReconnectReplay 重连补发：B 带 after_seq=0 进房，应补收到此前 A 发的全部消息
+// （replay 帧带 seq 字段，帧尾 replay_done.recovered 计数）。
+func TestWSReconnectReplay(t *testing.T) {
+	srv := testServer(t)
+	a := dialWS(t, srv, "user-a", "room-1", "danmu-secret-token")
+	defer a.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// A 发 3 条，等 worker 批量 flush + 热历史落定
+	for _, content := range []string{"one", "two", "three"} {
+		payload, _ := json.Marshal(map[string]any{"type": "danmu", "content": content, "client_ts": 1})
+		if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// B 首次进房（after_seq=0）→ 拉最近 N 条
+	b := dialWS(t, srv, "user-b", "room-1", "danmu-secret-token")
+	defer b.Close()
+	if err := b.WriteMessage(websocket.TextMessage, []byte(`{"type":"reconnect","after_seq":0}`)); err != nil {
+		t.Fatalf("reconnect send: %v", err)
+	}
+
+	got := make(map[string]bool)
+	recovered := -1
+	deadline := time.Now().Add(5 * time.Second)
+	for (len(got) < 3 || recovered < 0) && time.Now().Before(deadline) {
+		_, data, err := b.ReadMessage()
+		if err != nil {
+			t.Fatalf("ws read: %v", err)
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(data, &msgs); err != nil {
+			continue
+		}
+		for _, m := range msgs {
+			switch m["type"] {
+			case "danmu":
+				if content, ok := m["content"].(string); ok {
+					got[content] = true
+				}
+				if _, ok := m["seq"].(float64); !ok {
+					t.Fatalf("replay danmu missing seq: %v", m)
+				}
+			case "replay_done":
+				recovered = int(m["recovered"].(float64))
+			}
+		}
+	}
+	if recovered != 3 {
+		t.Fatalf("recovered = %d, want 3", recovered)
+	}
+	if !got["one"] || !got["two"] || !got["three"] {
+		t.Fatalf("missing replay messages: %v", got)
+	}
+}
+
+// TestWSReconnectReplayGapOnly 重连带 after_seq 只补缺口，不重发已收到的消息。
+func TestWSReconnectReplayGapOnly(t *testing.T) {
+	srv := testServer(t)
+	a := dialWS(t, srv, "user-a", "room-1", "danmu-secret-token")
+	defer a.Close()
+	b := dialWS(t, srv, "user-b", "room-1", "danmu-secret-token")
+	defer b.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// A 发 2 条，B 实时收到并记下最大 seq
+	var lastSeq uint64
+	for _, content := range []string{"first", "second"} {
+		payload, _ := json.Marshal(map[string]any{"type": "danmu", "content": content, "client_ts": 1})
+		if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		got := readDanmu(t, b)
+		if seq, ok := got["seq"].(float64); ok && uint64(seq) > lastSeq {
+			lastSeq = uint64(seq)
+		}
+	}
+
+	// B 断开，A 再发 2 条（B 缺席）
+	b.Close()
+	for _, content := range []string{"third", "fourth"} {
+		payload, _ := json.Marshal(map[string]any{"type": "danmu", "content": content, "client_ts": 1})
+		if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// B 重连（同 uid），带 after_seq=lastSeq，只应补收 2 条
+	b2 := dialWS(t, srv, "user-b", "room-1", "danmu-secret-token")
+	defer b2.Close()
+	payload, _ := json.Marshal(map[string]any{"type": "reconnect", "after_seq": lastSeq})
+	if err := b2.WriteMessage(websocket.TextMessage, payload); err != nil {
+		t.Fatalf("reconnect send: %v", err)
+	}
+
+	got := make(map[string]bool)
+	recovered := -1
+	deadline := time.Now().Add(5 * time.Second)
+	for (len(got) < 2 || recovered < 0) && time.Now().Before(deadline) {
+		_, data, err := b2.ReadMessage()
+		if err != nil {
+			t.Fatalf("ws read: %v", err)
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(data, &msgs); err != nil {
+			continue
+		}
+		for _, m := range msgs {
+			switch m["type"] {
+			case "danmu":
+				if content, ok := m["content"].(string); ok {
+					got[content] = true
+				}
+			case "replay_done":
+				recovered = int(m["recovered"].(float64))
+			}
+		}
+	}
+	if recovered != 2 {
+		t.Fatalf("recovered = %d, want 2 (only the gap)", recovered)
+	}
+	if !got["third"] || !got["fourth"] {
+		t.Fatalf("missing gap messages: %v", got)
+	}
+	if got["first"] || got["second"] {
+		t.Fatalf("replayed already-seen messages: %v", got)
 	}
 }

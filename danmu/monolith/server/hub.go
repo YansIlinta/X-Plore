@@ -34,6 +34,8 @@ type Hub struct {
 	mqMode      string // "redis" | "kafka" | "both"
 	filter      *SensitiveFilter
 	tokenIssuer *TokenIssuer
+	hist        *RoomHist // 短期热历史：断线重连/进房补发最近 N 条
+	roomSeqs    sync.Map  // roomID -> *atomic.Uint64 房间内消息序号计数器
 
 	msgIDCounter atomic.Uint64
 
@@ -55,6 +57,7 @@ func NewHub(serverID, mqMode string, ctx context.Context, cancel context.CancelF
 		msgQueue:   make(chan *Message, msgQueueSize),
 		mqMode:     mqMode,
 		filter:     NewSensitiveFilter(defaultSensitiveWords),
+		hist:       NewRoomHist(0, 0), // 默认 100 条/5min，main 里按 flag 覆盖
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -81,6 +84,28 @@ func fnv32(s string) uint32 {
 		h *= prime32
 	}
 	return h
+}
+
+// nextRoomSeq 取房间内下一个消息序号（单调递增，从 1 开始）
+func (h *Hub) nextRoomSeq(roomID string) uint64 {
+	v, _ := h.roomSeqs.LoadOrStore(roomID, new(atomic.Uint64))
+	return v.(*atomic.Uint64).Add(1)
+}
+
+// adoptRoomSeq 采纳跨机消息携带的序号：只把本地计数器推向更大值，绝不回退。
+// 跨机并发发送同一房间时序号可能重复/乱序（弹幕允许），seq 仅作补发缺口提示。
+func (h *Hub) adoptRoomSeq(roomID string, seq uint64) {
+	if seq == 0 {
+		return
+	}
+	v, _ := h.roomSeqs.LoadOrStore(roomID, new(atomic.Uint64))
+	counter := v.(*atomic.Uint64)
+	for {
+		cur := counter.Load()
+		if seq <= cur || counter.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
 }
 
 // Run 主循环，处理连接注册/注销
@@ -112,6 +137,7 @@ func (h *Hub) addClient(c *Client) {
 		old.cancel()
 	}
 	room[c.uid] = c
+	c.registered.Store(true)
 	metricConnectionsTotal.Inc()
 	// 不在此处按连接打日志：万级/百万级连接下，单条 log.Printf 走序列化的
 	// Hub.Run 单 goroutine，会显著抬高建连延迟。连接计数由 metric/stats 观测。
@@ -238,6 +264,10 @@ func (h *Hub) CloseRoom(roomID string) bool {
 	}
 	delete(shard.rooms, roomID)
 	shard.mu.Unlock()
+
+	// 房间序号计数器与热历史一并清理，避免房间 churn 造成无界增长
+	h.roomSeqs.Delete(roomID)
+	h.hist.Clear(roomID)
 
 	for _, c := range clients {
 		c.Close(4001, "room closed")

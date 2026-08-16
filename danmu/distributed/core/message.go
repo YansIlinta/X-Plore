@@ -18,6 +18,9 @@ type Message struct {
 	SourceServer string `json:"source_server,omitempty"` // origin comet id，仅观测用
 	// OffsetMS 点播弹幕：相对视频起点的毫秒；直播可忽略/为 0。
 	OffsetMS int64 `json:"offset_ms,omitempty"`
+	// Seq 房间内单调递增序号（与单体对齐；单体的 worker flush 打号，
+	// 分布式侧重连补发未实现前恒为 0，仅保留字段做跨端 wire 兼容）。
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // UpMessage 上行消息（客户端 → comet）。

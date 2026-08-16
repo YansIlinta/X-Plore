@@ -88,6 +88,16 @@ func (rh *RedisHub) handleIncoming(channel, payload string) {
 	if len(msgs) == 0 || msgs[0].SourceServer == rh.serverID {
 		return
 	}
+	// 采纳跨机消息携带的序号并写入本地热历史（序号由源机打号，本机只取最大值），
+	// 使本机客户端的重连补发同样覆盖经 Redis 到达的消息。
+	var maxSeq uint64
+	for _, m := range msgs {
+		if m.Seq > maxSeq {
+			maxSeq = m.Seq
+		}
+	}
+	rh.hub.adoptRoomSeq(roomID, maxSeq)
+	rh.hub.hist.AppendBatch(roomID, msgs)
 	// payload 已经是目标广播格式（[]Message 的 JSON 数组），直接转发给客户端，无需重新 Marshal
 	rh.hub.BroadcastToRoom(roomID, []byte(payload))
 }

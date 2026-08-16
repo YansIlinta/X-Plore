@@ -37,6 +37,10 @@ type Client struct {
 	closeCode   int
 	closeReason string
 
+	// registered 在 hub.addClient 完成后置位：重连补发需等注册完成，
+	// 避免「注册窗口内广播既没实时投递、又没进热历史快照」的漏补。
+	registered atomic.Bool
+
 	sessionExpiresAt atomic.Int64
 }
 
@@ -98,6 +102,12 @@ func (c *Client) readPump() {
 			continue
 		}
 
+		if up.Type == "reconnect" {
+			// 重连/进房补发请求：不占用限流配额，也不经过 msgQueue
+			c.handleReconnect(up.AfterSeq)
+			continue
+		}
+
 		// 限流检查
 		if !c.limiter.Allow() {
 			// 超额消息丢弃，不断开连接
@@ -139,6 +149,45 @@ func (c *Client) readPump() {
 			releaseMessage(msg)
 			log.Printf("[readPump] msgQueue full, dropping message from uid=%s room=%s", c.uid, c.roomID)
 		}
+	}
+}
+
+// handleReconnect 处理重连/进房补发：等本连接注册完成后，从热历史取
+// seq > afterSeq 的消息一次性下发（帧尾带 replay_done 控制消息）。
+// after_seq=0（首连）等价于「进房拉最近 N 条」。
+func (c *Client) handleReconnect(afterSeq uint64) {
+	if c.hub.hist == nil {
+		return
+	}
+	// 注册在 Hub.Run 单 goroutine 里完成，正常亚毫秒级；上限 500ms 兜底
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for !c.registered.Load() {
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	msgs, latestSeq := c.hub.hist.ReplayFrom(c.roomID, afterSeq, 0)
+	frame := make([]any, 0, len(msgs)+1)
+	for i := range msgs {
+		frame = append(frame, msgs[i])
+	}
+	frame = append(frame, map[string]any{
+		"type":       "replay_done",
+		"room_id":    c.roomID,
+		"latest_seq": latestSeq,
+		"recovered":  len(msgs),
+	})
+	data, err := json.Marshal(frame)
+	if err != nil {
+		log.Printf("[reconnect] uid=%s room=%s marshal error: %v", c.uid, c.roomID, err)
+		return
+	}
+	// 阻塞式投递：补发语义不允许静默丢弃；writePump 批量排空很快，正常不会久等
+	select {
+	case c.sendCh <- data:
+	case <-c.ctx.Done():
 	}
 }
 

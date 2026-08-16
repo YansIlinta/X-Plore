@@ -80,11 +80,18 @@ func (wp *WorkerPool) worker(id int) {
 
 		// 按房间批量广播（优先完成本机 + Redis 实时路径）
 		for roomID, msgs := range roomMsgs {
+			// 先按房间打序号并入热历史，再序列化广播：保证「补发可见」的消息
+			// 一定不会漏出实时路径（顺序相反时，注册窗口内会漏补）。
+			for _, msg := range msgs {
+				msg.Seq = wp.hub.nextRoomSeq(roomID)
+			}
 			data, err := json.Marshal(msgs)
 			if err != nil {
 				log.Printf("[worker %d] marshal error: %v", id, err)
 				continue
 			}
+
+			wp.hub.hist.AppendBatch(roomID, msgs)
 
 			// 本机广播
 			wp.hub.BroadcastToRoom(roomID, data)

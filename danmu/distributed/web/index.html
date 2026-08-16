@@ -67,6 +67,8 @@ let connected = false;
 let pollTimer = null;
 let sessionRefreshTimer = null;
 let sessionExpiresAt = null;
+// 已收到的最大消息序号（seq）：重连时带给服务端做缺口补发；0 = 首连拉最近 N 条
+let lastSeq = 0;
 
 // 消息去重滑动窗口：Redis Pub/Sub 和 Kafka 广播消费者双路径都可能触达客户端，
 // 用 msg_id 去重，避免同一条弹幕重复渲染。定长队列保证内存不无限增长。
@@ -128,6 +130,8 @@ function connect() {
     document.getElementById('roomName').textContent = document.getElementById('roomInput').value;
     addSystemMsg('连接成功');
     startPolling();
+    // 断线补发/进房拉最近 N 条：带上已收到的最大 seq（首连为 0）
+    ws.send(JSON.stringify({ type: 'reconnect', after_seq: lastSeq }));
   };
 
   ws.onmessage = (evt) => {
@@ -150,6 +154,12 @@ function connect() {
       if (msg.type === 'reauth_ack') {
         return;
       }
+      if (msg.type === 'replay_done') {
+        if (msg.latest_seq) lastSeq = Math.max(lastSeq, msg.latest_seq);
+        if (msg.recovered > 0) addSystemMsg(`断线补发：已恢复 ${msg.recovered} 条消息`);
+        return;
+      }
+      if (msg.seq) lastSeq = Math.max(lastSeq, msg.seq);
       if (isDuplicateMsg(msg.msg_id)) return;
       addDanmu(msg);
     });

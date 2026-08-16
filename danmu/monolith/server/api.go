@@ -302,7 +302,10 @@ func (a *API) broadcastRoom(roomID, content string) {
 		ServerTS:     time.Now().UnixMilli(),
 		SourceServer: a.hub.serverID,
 	}
+	// 与 worker 批量路径一致：先打号入热历史、再广播，重连补发可覆盖管理员广播
+	msg.Seq = a.hub.nextRoomSeq(roomID)
 	data, _ := json.Marshal([]*Message{msg})
+	a.hub.hist.AppendBatch(roomID, []*Message{msg})
 	a.hub.BroadcastToRoom(roomID, data)
 	if a.hub.redisHub != nil {
 		if err := a.hub.redisHub.PublishBatch(roomID, data); err != nil {

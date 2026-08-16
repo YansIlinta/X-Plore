@@ -437,3 +437,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 # Prometheus 指标（无需鉴权）
 curl http://localhost:8081/metrics
 ```
+
+### WebSocket 重连补发协议（热历史）
+
+服务端为每个房间维护短期热历史（ring buffer + TTL，与 ClickHouse 冷历史分层），
+广播消息携带房间内单调递增的 `seq` 字段。客户端断线重连（或首次进房）后发送：
+
+```json
+{"type": "reconnect", "after_seq": 123}
+```
+
+服务端把 `seq > after_seq` 的消息一次性补发（帧尾带控制消息），之后无缝接上实时流：
+
+```json
+[
+  {"type": "danmu", "seq": 124, "msg_id": "srv1-124", "...": "..."},
+  {"type": "replay_done", "latest_seq": 130, "recovered": 7}
+]
+```
+
+- `after_seq=0`（首连）= 进房拉最近 N 条。
+- 去重仍以 `msg_id` 为准（前端已有 2000 条去重滑窗），`seq` 只作缺口提示。
+- 相关 flag：`-hist-size`（每房间条数，默认 100）、`-hist-ttl`（TTL，默认 5m）。
+- 验收校验：`loadtest -reconnect-check`（发送端持续发消息，接收端断开后带
+  `after_seq` 重连，核对补发条数）。
