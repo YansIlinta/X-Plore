@@ -200,7 +200,7 @@ func main() {
 		GroupID:        "danmu-job",
 		MinBytes:       1,
 		MaxBytes:       10e6,
-		CommitInterval: time.Second, // 广播是 fire-and-forget，at-most-once 可接受（弹幕允许丢）
+		CommitInterval: 0, // 同步提交：读到即提交，at-most-once（弹幕允许丢，但绝不重复）
 		StartOffset:    kafka.LastOffset,
 	})
 	defer reader.Close()

@@ -112,16 +112,18 @@ func main() {
 	var kafkaProduceErrs atomic.Int64
 
 	brokers := splitComma(*kafkaBrokers)
+	// 注意：Async 模式下 WriteTimeout 不生效（异步路径不经过写超时），
+	// 失败批次走 ErrorLogger 丢弃并计数；key=roomID 的保序只是 best-effort——
+	// 批次重试失败丢弃后，同房间后到的消息可能先到（有序性有洞）。
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
 		Topic:        *kafkaTopic,
-		Balancer:     &kafka.Hash{}, // key=roomID → 同房间同 partition，保序
+		Balancer:     &kafka.Hash{}, // key=roomID → 同房间同 partition（best-effort 保序）
 		BatchSize:    500,
 		BatchTimeout: 10 * time.Millisecond,
 		Async:        true,
 		RequiredAcks: kafka.RequireOne,
 		MaxAttempts:  3,
-		WriteTimeout: 5 * time.Second,
 		ErrorLogger: kafka.LoggerFunc(func(m string, a ...interface{}) {
 			kafkaProduceErrs.Add(1) // 观测：异步 produce 失败计数
 			log.Printf("[kafka] "+m, a...)
