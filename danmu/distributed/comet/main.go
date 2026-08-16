@@ -77,6 +77,7 @@ type comet struct {
 	startTime  time.Time
 	uplinkCh   chan uplinkMsg
 	standalone bool
+	ctx        context.Context // 进程生命周期 ctx：worker 随它退出
 
 	// standalone 本地模式用：无 logic 时 comet 自己过滤+生成 msg_id+本机广播
 	filter   *core.SensitiveFilter
@@ -132,35 +133,45 @@ func (c *comet) onUplink(uid, roomID, content string, clientTS, clientTSN, offse
 }
 
 // uplinkWorker 消费上行队列：分布式→转发 Logic；standalone→本机过滤+广播。
+// ctx 取消时退出（优雅关闭不留残留 goroutine）。
 func (c *comet) uplinkWorker() {
-	for m := range c.uplinkCh {
-		if c.standalone {
-			c.localBroadcast(m)
-			continue
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case m := <-c.uplinkCh:
+			c.handleUplink(m)
 		}
-		client, ok := c.logics.forRoom(m.roomID)
-		if !ok {
-			continue // 无可用 logic，丢弃（弹幕允许丢）
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		start := time.Now()
-		resp, err := client.OnMessage(ctx, &pb.OnMessageReq{
-			RoomId: m.roomID, Uid: m.uid, Content: m.content,
-			ClientTs: m.clientTS, ClientTsNano: m.clientTSN, SourceComet: c.id,
-			OffsetMs: m.offsetMS,
-		})
-		cancel()
-		if err != nil {
-			log.Printf("[comet] logic OnMessage error: %v", err)
-			continue
-		}
-		// msg_id 由 logic 生成，所以上行 span 只能等 RPC 返回后补记。
-		// 采样判定用同一套确定性哈希，与 logic 的结论必然一致。
-		if c.tracer.Sampled(resp.MsgId) {
-			c.tracer.Record(resp.MsgId, core.HopCometUplink, m.roomID,
-				"logic_rtt_ms="+strconv.FormatInt(time.Since(start).Milliseconds(), 10),
-				time.Now().UnixNano())
-		}
+	}
+}
+
+func (c *comet) handleUplink(m uplinkMsg) {
+	if c.standalone {
+		c.localBroadcast(m)
+		return
+	}
+	client, ok := c.logics.forRoom(m.roomID)
+	if !ok {
+		return // 无可用 logic，丢弃（弹幕允许丢）
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	start := time.Now()
+	resp, err := client.OnMessage(ctx, &pb.OnMessageReq{
+		RoomId: m.roomID, Uid: m.uid, Content: m.content,
+		ClientTs: m.clientTS, ClientTsNano: m.clientTSN, SourceComet: c.id,
+		OffsetMs: m.offsetMS,
+	})
+	cancel()
+	if err != nil {
+		log.Printf("[comet] logic OnMessage error: %v", err)
+		return
+	}
+	// msg_id 由 logic 生成，所以上行 span 只能等 RPC 返回后补记。
+	// 采样判定用同一套确定性哈希，与 logic 的结论必然一致。
+	if c.tracer.Sampled(resp.MsgId) {
+		c.tracer.Record(resp.MsgId, core.HopCometUplink, m.roomID,
+			"logic_rtt_ms="+strconv.FormatInt(time.Since(start).Milliseconds(), 10),
+			time.Now().UnixNano())
 	}
 }
 
@@ -295,6 +306,7 @@ func main() {
 		startTime:  time.Now(),
 		uplinkCh:   make(chan uplinkMsg, 100000),
 		standalone: standalone,
+		ctx:        ctx,
 		filter:     core.NewSensitiveFilter(core.DefaultSensitiveWords),
 		tracer:     core.NewTraceRecorder(*id, uint32(*traceRate), *traceBuf),
 		upgrader: websocket.Upgrader{

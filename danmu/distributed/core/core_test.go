@@ -164,9 +164,11 @@ func TestHubCounterConsistency(t *testing.T) {
 	}
 }
 
-// TestWritePumpCloseRace 验证 WritePump 读 closeCode/closeReason 与 Close 并发写
-// 之间没有数据竞态（-race 下运行）。同步链：Close 内先写 closeCode 再 cancel →
-// ctx.Done 关闭 → WritePump 从 ctx.Done 分支唤醒后读取，构成 happens-before。
+// TestWritePumpCloseRace 验证 WritePump 读关闭状态与 Close 并发写之间没有数据竞态
+// （-race 下运行）。覆盖两种交错：
+//   A. 多个管理面并发 Close（closeOnce 串行化，atomic 发布关闭状态）
+//   B. 非 Close 路径先 cancel（模拟 ReadPump defer / 父 ctx 取消唤醒 WritePump），
+//      同时管理面并发 Close——这是历史上真实存在的竞态窗口（裸字段读写无同步）。
 func TestWritePumpCloseRace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -187,7 +189,7 @@ func TestWritePumpCloseRace(t *testing.T) {
 	defer cancel()
 	hub := NewHub("t-race", ctx)
 
-	for iter := 0; iter < 50; iter++ {
+	for iter := 0; iter < 100; iter++ {
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
@@ -195,16 +197,32 @@ func TestWritePumpCloseRace(t *testing.T) {
 		c := NewClient(hub, conn, "u1", "r1", ctx)
 		go c.WritePump()
 
-		var wg sync.WaitGroup
-		for g := 0; g < 8; g++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				c.Close(4001, "race-test")
-			}()
+		if iter%2 == 0 {
+			// 场景 A：管理面并发 Close
+			var wg sync.WaitGroup
+			for g := 0; g < 8; g++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					c.Close(4001, "race-test")
+				}()
+			}
+			wg.Wait()
+		} else {
+			// 场景 B：先由非 Close 路径 cancel（ReadPump defer 语义），再并发 Close
+			c.cancel()
+			var wg sync.WaitGroup
+			for g := 0; g < 8; g++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					c.Close(4001, "race-test")
+				}()
+			}
+			wg.Wait()
 		}
-		wg.Wait()
-		// 等 WritePump 退出（读到 closeCode 后写 CloseMessage）
+
+		// 等 WritePump 退出（读到关闭状态后写 CloseMessage）
 		select {
 		case <-c.ctx.Done():
 		case <-time.After(2 * time.Second):
