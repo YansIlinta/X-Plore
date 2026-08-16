@@ -42,12 +42,24 @@ type loadtestManager struct {
 
 // NewLoadtestManager 构造压测管理器。bin 是相对/绝对路径或 PATH 里的可执行名；
 // 不存在时 available=false，Start 会返回明确错误。
+// Windows 特例：go build -o bin/loadtest 产出的无扩展名 PE 文件 os.Stat 可见，
+// 但 exec 因没有可执行扩展名拒绝运行（Go 的 LookPath 要求 .exe 等 PATHEXT 扩展名），
+// 所以这里先归一成绝对路径，并对 bin+".exe" 做一次兜底探测。
 func NewLoadtestManager(bin, token string) *loadtestManager {
 	m := &loadtestManager{bin: bin, token: token}
-	if _, err := os.Stat(bin); err == nil {
-		m.available = true
-	} else if p, err := exec.LookPath(bin); err == nil {
-		m.bin, m.available = p, true
+	if abs, err := filepath.Abs(bin); err == nil {
+		m.bin = abs
+	}
+	for _, cand := range []string{m.bin, m.bin + ".exe"} {
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			m.bin, m.available = cand, true
+			break
+		}
+	}
+	if !m.available {
+		if p, err := exec.LookPath(bin); err == nil {
+			m.bin, m.available = p, true
+		}
 	}
 	return m
 }

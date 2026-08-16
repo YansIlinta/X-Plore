@@ -33,13 +33,69 @@ func TestEventBufferRecentOrder(t *testing.T) {
 	}
 }
 
-// rpcAddrOf 按主机名对 HTTP 观测地址与 RPC 地址。
-func TestRPCMatch(t *testing.T) {
-	if got := rpcAddrOf("comet1:8080", []string{"comet2:7500", "comet1:7500"}); got != "comet1:7500" {
+// takeAddr：不同主机按主机名对上；同主机多实例按序依次配对；无匹配返回空。
+func TestTakeAddr(t *testing.T) {
+	// 单实例主机：直接对上
+	pool := map[string][]string{"comet1": {"comet1:7500"}, "comet2": {"comet2:7500"}}
+	if got := takeAddr("comet1:8080", pool); got != "comet1:7500" {
 		t.Fatalf("got %q", got)
 	}
-	if got := rpcAddrOf("comet1:8080", []string{"comet2:7500"}); got != "" {
+	// 同主机多实例：按序弹出，两个 http 地址分别拿到两个 rpc 地址
+	pool = map[string][]string{"localhost": {"localhost:17500", "localhost:17501"}}
+	if got := takeAddr("localhost:17080", pool); got != "localhost:17500" {
+		t.Fatalf("first: got %q", got)
+	}
+	if got := takeAddr("localhost:17081", pool); got != "localhost:17501" {
+		t.Fatalf("second: got %q", got)
+	}
+	// 无匹配：空
+	if got := takeAddr("comet1:8080", map[string][]string{"comet2": {"comet2:7500"}}); got != "" {
 		t.Fatalf("got %q, want empty", got)
+	}
+}
+
+// probeServices 回归：同一组件多实例只能聚成一个 Service 组（曾经 byComp 只查不写，
+// 导致 2 个 comet 实例时 /api/services 出现两个 comet 组、overview 实例数翻倍）。
+func TestProbeServicesGrouping(t *testing.T) {
+	newSrv := func(id string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			switch r.URL.Path {
+			case "/health":
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			case "/api/v1/stats":
+				_, _ = w.Write([]byte(`{"server_id":"` + id + `"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+	s1, s2, sl := newSrv("comet1"), newSrv("comet2"), newSrv("logic1")
+	defer s1.Close()
+	defer s2.Close()
+	defer sl.Close()
+	a := func(s *httptest.Server) string { return s.Listener.Addr().String() }
+
+	c := NewCollector(Config{})
+	all := map[string][]string{
+		"comet":      {a(s1), a(s2)},
+		"comet-http": {a(s1), a(s2)},
+		"logic":      {a(sl)},
+		"logic-http": {a(sl)},
+	}
+	svcs := c.probeServices(all)
+	if len(svcs) != 2 {
+		t.Fatalf("groups=%d, want 2: %+v", len(svcs), svcs)
+	}
+	if svcs[0].Name != "comet" || len(svcs[0].Instances) != 2 {
+		t.Fatalf("comet group: %+v", svcs[0])
+	}
+	if svcs[1].Name != "logic" || len(svcs[1].Instances) != 1 {
+		t.Fatalf("logic group: %+v", svcs[1])
+	}
+	// 同主机多实例：rpc 地址按序配对，不能两个都取第一个
+	if svcs[0].Instances[0].RPCAddr != a(s1) || svcs[0].Instances[1].RPCAddr != a(s2) {
+		t.Fatalf("rpc pairing: %+v", svcs[0].Instances)
 	}
 }
 
@@ -153,6 +209,11 @@ func TestCometRates(t *testing.T) {
 	}
 	if *in <= 0 || *out <= 0 || *out != *in*2 {
 		t.Fatalf("rates: in=%v out=%v", *in, *out)
+	}
+	// 量级校验：100 条 / 数十毫秒 ≈ 数千/s。dt 若取了零时间（回归 bug），
+	// 速率会是 ~1e-9 量级，只有符号和比例检查会漏掉它。
+	if *in < 100 || *in > 100000 {
+		t.Fatalf("rate magnitude: in=%v, want ~1000-10000 (dt used: %.3fs)", *in, 100/ *in)
 	}
 
 	// 计数器重置（重启模拟）→ 本轮 nil
