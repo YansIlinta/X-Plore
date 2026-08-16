@@ -1,0 +1,13 @@
+# etcd 客户端面 TLS 化（可选）。在明文基线（k8s/）之上，把 etcd 的 client 端口换成
+# https、四个业务服务的 etcd 客户端经 env DANMU_ETCD_* 挂证书。peer 面仍走明文
+# （单 namespace 内网；要全加密再给 PeerTLSInfo 生成 peer 证书即可，同套路）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: etcd.yaml
+  - path: comet.yaml
+  - path: logic.yaml
+  - path: job.yaml
+  - path: ops.yaml

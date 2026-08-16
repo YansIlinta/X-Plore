@@ -13,3 +13,6 @@ danmu/*/etcd-data/
 
 # deps
 node_modules/
+
+# etcd TLS 证书（本地生成，勿提交）
+danmu/distributed/k8s/tls/certs/

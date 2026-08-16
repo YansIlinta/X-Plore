@@ -1,0 +1,33 @@
+{{- if .Values.ingress.enabled }}
+# 可选 Ingress（需集群已有 Ingress Controller，见 k8s/base/36-ingress.yaml 头注释）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: danmu
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.hosts.danmu | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+    - host: {{ .Values.ingress.hosts.ops | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ops
+                port:
+                  number: 7900
+{{- end }}

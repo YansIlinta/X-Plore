@@ -1,0 +1,60 @@
+# 部署目标命名空间：chart 内资源不带 namespace，统一由 helm 控制：
+#   helm install danmu . -n danmu --create-namespace
+createNamespace: false
+
+image:
+  repository: danmu-distributed
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# 落库 consumer 的镜像从 ../monolith 构建（Dockerfile.consumer）
+consumerImage:
+  repository: danmu-consumer
+  tag: latest
+  pullPolicy: IfNotPresent
+
+etcd:
+  image: quay.io/coreos/etcd:v3.5.21
+  # 固定 initial-cluster 的 StatefulSet：首装后改 replicas 需要先 etcdctl member add/remove，
+  # 不能直接 scale。
+  replicas: 3
+
+kafka:
+  image: bitnami/kafka:3.7
+
+clickhouse:
+  image: clickhouse/clickhouse-server:24.3-alpine
+
+nginx:
+  image: nginx:alpine
+
+# 敏感配置（基线为开发默认值，与裸机/compose 一致；生产覆盖）：
+#   helm install danmu . -n danmu --set auth.token=<强随机> --set auth.jwtSecret=<强随机>
+auth:
+  token: "danmu-secret-token"
+  jwtSecret: "dev-only-change-me"
+
+wsAllowedOrigins: "*"
+
+comet:
+  replicas: 2
+logic:
+  replicas: 2
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilization: 70
+
+# 入向白名单（见 k8s/base/40-networkpolicy.yaml 的注释）
+networkPolicy:
+  enabled: true
+
+# 可选 Ingress（需集群已有 Ingress Controller）
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+    danmu: danmu.example.com
+    ops: ops.danmu.example.com

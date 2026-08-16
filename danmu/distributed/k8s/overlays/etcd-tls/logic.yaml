@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logic
+  namespace: danmu
+spec:
+  template:
+    spec:
+      containers:
+        - name: logic
+          command:
+            - /app/logic
+            - -addr=:7400
+            - -id=$(POD_NAME)
+            - -etcd=https://etcd-client:2379
+            - -advertise=$(POD_IP):7400
+            - -advertise-http=$(POD_IP):7410
+            - -http-addr=:7410
+            - -kafka=kafka:9092
+            - -trace-sample=100
+          env:
+            - name: DANMU_ETCD_CA
+              value: /certs/ca.crt
+            - name: DANMU_ETCD_CERT
+              value: /certs/client.crt
+            - name: DANMU_ETCD_KEY
+              value: /certs/client.key
+          volumeMounts:
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: danmu-etcd-tls

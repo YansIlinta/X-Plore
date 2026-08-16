@@ -1,0 +1,180 @@
+# NetworkPolicy：按服务面的入向白名单。
+#
+# 语义：pod 一旦被某条策略选中，只放行下列入向流量；未被任何策略选中的 pod 不受影响。
+# 出向不做限制（DNS/集群内 egress 需保持开放，收紧出向是更细的后续工作）。
+# 注意：kubelet 探针与 port-forward 不经 NetworkPolicy，不会被误伤。
+#
+# 覆盖的服务发现直连路径（区别于 compose 的「服务间全靠 Service」）：
+#   comet→logic pod :7400、job→comet pod :7500、ops→各 *-http pod——这些是
+#   etcd 发现后按 pod IP 直连的流量，必须显式放行。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-etcd-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: etcd
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: etcd # peer 互连 + 自身 client
+      ports:
+        - port: 2379
+        - port: 2380
+    - from:
+        - podSelector:
+            matchLabels:
+              app: comet
+        - podSelector:
+            matchLabels:
+              app: logic
+        - podSelector:
+            matchLabels:
+              app: job
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 2379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-kafka-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: kafka
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: logic
+        - podSelector:
+            matchLabels:
+              app: job
+        - podSelector:
+            matchLabels:
+              app: consumer
+      ports:
+        - port: 9092
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-clickhouse-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: clickhouse
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: consumer
+      ports:
+        - port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-comet-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: comet
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx
+      ports:
+        - port: 8080 # WS/HTTP 入口
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 8080 # 观测探针（/health、/api/v1/stats、/metrics）
+    - from:
+        - podSelector:
+            matchLabels:
+              app: job
+      ports:
+        - port: 7500 # PushRoom（etcd 发现后按 pod IP 直连）
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-logic-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: logic
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: comet
+      ports:
+        - port: 7400 # OnMessage（etcd 发现后按 pod IP 直连）
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 7410 # 观测探针
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-job-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: job
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 7420 # 观测探针
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-ops-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: ops
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx
+      ports:
+        - port: 7900
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-nginx-ingress
+  namespace: danmu
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx
+  ingress:
+    - ports:
+        - port: 80 # 边缘入口：Ingress Controller（其他命名空间）与 NodePort 均放行

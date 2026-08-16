@@ -1,0 +1,16 @@
+apiVersion: v2
+name: danmu-distributed
+description: 百万 QPS 弹幕系统分布式版（goim 式 Comet/Logic/Job + etcd/Kafka/ClickHouse + Ops Console）
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - danmu
+  - danmaku
+  - goim
+  - websocket
+  - kafka
+  - etcd
+home: https://github.com/YansIlinta/X-Plore/tree/main/danmu/distributed
+sources:
+  - https://github.com/YansIlinta/X-Plore

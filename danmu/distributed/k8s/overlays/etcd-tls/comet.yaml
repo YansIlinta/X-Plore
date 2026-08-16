@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comet
+  namespace: danmu
+spec:
+  template:
+    spec:
+      containers:
+        - name: comet
+          command:
+            - /app/comet
+            - -ws-addr=:8080
+            - -rpc-addr=:7500
+            - -advertise=$(POD_IP):7500
+            - -advertise-http=$(POD_IP):8080
+            - -id=$(POD_NAME)
+            - -etcd=https://etcd-client:2379
+            - -trace-sample=100
+          env:
+            - name: DANMU_ETCD_CA
+              value: /certs/ca.crt
+            - name: DANMU_ETCD_CERT
+              value: /certs/client.crt
+            - name: DANMU_ETCD_KEY
+              value: /certs/client.key
+          volumeMounts:
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: danmu-etcd-tls

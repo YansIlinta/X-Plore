@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops
+  namespace: danmu
+spec:
+  template:
+    spec:
+      containers:
+        - name: ops
+          command:
+            - /app/ops
+            - -addr=:7900
+            - -etcd=https://etcd-client:2379
+            - -kafka=kafka:9092
+            - -poll=2s
+          env:
+            - name: DANMU_ETCD_CA
+              value: /certs/ca.crt
+            - name: DANMU_ETCD_CERT
+              value: /certs/client.crt
+            - name: DANMU_ETCD_KEY
+              value: /certs/client.key
+          volumeMounts:
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: danmu-etcd-tls

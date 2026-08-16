@@ -1,0 +1,166 @@
+{{- if .Values.networkPolicy.enabled }}
+# 入向白名单（与 k8s/base/40-networkpolicy.yaml 同矩阵）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-etcd-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: etcd
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: etcd
+      ports:
+        - port: 2379
+        - port: 2380
+    - from:
+        - podSelector:
+            matchLabels:
+              app: comet
+        - podSelector:
+            matchLabels:
+              app: logic
+        - podSelector:
+            matchLabels:
+              app: job
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 2379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-kafka-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: kafka
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: logic
+        - podSelector:
+            matchLabels:
+              app: job
+        - podSelector:
+            matchLabels:
+              app: consumer
+      ports:
+        - port: 9092
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-clickhouse-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: clickhouse
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: consumer
+      ports:
+        - port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-comet-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: comet
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx
+      ports:
+        - port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app: job
+      ports:
+        - port: 7500
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-logic-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: logic
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: comet
+      ports:
+        - port: 7400
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 7410
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-job-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: job
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops
+      ports:
+        - port: 7420
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-ops-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: ops
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx
+      ports:
+        - port: 7900
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: danmu-nginx-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx
+  ingress:
+    - ports:
+        - port: 80
+{{- end }}

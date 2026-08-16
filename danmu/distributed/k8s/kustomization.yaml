@@ -1,16 +1,6 @@
+# 顶层入口：kubectl apply -k k8s/ 等价于应用 base/。
+# overlays/ 目录下的变体（如 etcd-tls）单独 apply，不被本入口包含。
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - 00-namespace.yaml
-  - 10-config.yaml
-  - 10-secret.yaml
-  - 20-etcd.yaml
-  - 21-kafka.yaml
-  - 22-clickhouse.yaml
-  - 30-comet.yaml
-  - 31-logic.yaml
-  - 32-job.yaml
-  - 33-consumer.yaml
-  - 34-ops.yaml
-  - 35-nginx.yaml
-  # 36-ingress.yaml 是可选项，默认不部署（需集群已有 Ingress Controller），见文件头注释
+  - base

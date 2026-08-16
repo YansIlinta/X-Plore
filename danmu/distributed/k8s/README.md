@@ -2,27 +2,31 @@
 
 与 `docker-compose.goim.yml` 等价的一整套 Kubernetes 清单，命名空间 `danmu`：
 
-| 文件 | 内容 |
+| 路径 | 内容 |
 |------|------|
-| `00-namespace.yaml` | 命名空间 `danmu` |
-| `10-config.yaml` | ConfigMap `danmu-env`：非敏感项（`WS_ALLOWED_ORIGINS`） |
-| `10-secret.yaml` | Secret `danmu-secret`：`DANMU_AUTH_TOKEN` / `JWT_SECRET`（基线为开发默认值，生产覆盖见下） |
-| `20-etcd.yaml` | etcd **3 节点** StatefulSet + headless `etcd`（peer/per-pod 直连）+ `etcd-client`（应用入口）+ PDB（minAvailable 2，保多数派） |
-| `21-kafka.yaml` | Kafka KRaft 单节点 StatefulSet（与 compose 同镜像同配置，10 分区 auto-create） |
-| `22-clickhouse.yaml` | ClickHouse 单节点 StatefulSet（落库目标） |
-| `30-comet.yaml` | comet Deployment（2 副本）+ Service（WS 入口，ClientIP 粘性）+ HPA（CPU 70%，2–20）+ PDB（minAvailable 1） |
-| `31-logic.yaml` | logic Deployment（2 副本）+ HPA（CPU 70%，2–20）+ PDB（minAvailable 1），无 Service（etcd 发现直连 pod IP） |
-| `32-job.yaml` | job Deployment（**固定 1 副本**：同步提交 at-most-once，扩副本无益） |
-| `33-consumer.yaml` | 落库 consumer Deployment（镜像来自 `../monolith`） |
-| `34-ops.yaml` | ops Deployment + Service（`/api/*` 观测面 + 内嵌 UI） |
-| `35-nginx.yaml` | nginx Deployment + Service（WS/HTTP 统一入口，对应 compose 的 `:8088`） |
-| `36-ingress.yaml` | **可选** Ingress（需集群已有 Ingress Controller），默认不随 kustomize 部署 |
-| `kustomization.yaml` | 全部资源汇总，`kubectl apply -k` 一次部署 |
+| `kustomization.yaml` | 顶层入口（`resources: [base]`），`kubectl apply -k k8s/` 一次部署 |
+| `base/00-namespace.yaml` | 命名空间 `danmu` |
+| `base/10-config.yaml` | ConfigMap `danmu-env`：非敏感项（`WS_ALLOWED_ORIGINS`） |
+| `base/10-secret.yaml` | Secret `danmu-secret`：`DANMU_AUTH_TOKEN` / `JWT_SECRET`（基线为开发默认值，生产覆盖见下） |
+| `base/20-etcd.yaml` | etcd **3 节点** StatefulSet + headless `etcd`（peer/per-pod 直连）+ `etcd-client`（应用入口）+ PDB（minAvailable 2，保多数派） |
+| `base/21-kafka.yaml` | Kafka KRaft 单节点 StatefulSet（与 compose 同镜像同配置，10 分区 auto-create） |
+| `base/22-clickhouse.yaml` | ClickHouse 单节点 StatefulSet（落库目标） |
+| `base/30-comet.yaml` | comet Deployment（2 副本）+ Service（WS 入口，ClientIP 粘性）+ HPA（CPU 70%，2–20）+ PDB（minAvailable 1） |
+| `base/31-logic.yaml` | logic Deployment（2 副本）+ HPA（CPU 70%，2–20）+ PDB（minAvailable 1），无 Service（etcd 发现直连 pod IP） |
+| `base/32-job.yaml` | job Deployment（**固定 1 副本**：同步提交 at-most-once，扩副本无益） |
+| `base/33-consumer.yaml` | 落库 consumer Deployment（镜像来自 `../monolith`） |
+| `base/34-ops.yaml` | ops Deployment + Service（`/api/*` 观测面 + 内嵌 UI） |
+| `base/35-nginx.yaml` | nginx Deployment + Service（WS/HTTP 统一入口，对应 compose 的 `:8088`） |
+| `base/36-ingress.yaml` | **可选** Ingress（需集群已有 Ingress Controller），默认不随 kustomize 部署 |
+| `base/40-networkpolicy.yaml` | 入向白名单 ×8（含 etcd 发现直连的 pod 间流量），见下「网络策略」 |
+| `overlays/etcd-tls/` | **可选** overlay：etcd 客户端面 https + 四服务 TLS 客户端（配 `tls/gen-certs.sh`） |
+| `tls/` | 证书生成脚本与说明（`certs/` 已 gitignore） |
+| `../helm/danmu/` | 同一部署的 **Helm chart**（values 参数化，见 `../helm/danmu/README.md`） |
 
 ## K8s 化要点（与裸机/compose 的差异）
 
 - **注册地址 = pod IP**：comet/logic/job 的 `-advertise(-http)` 用 downward API 的
-  `$(POD_IP)`（`30/31/32-*.yaml`）。pod 重启后 IP 变化，etcd 旧 key 靠 10s 租约过期自动
+  `$(POD_IP)`（`base/30/31/32-*.yaml`）。pod 重启后 IP 变化，etcd 旧 key 靠 10s 租约过期自动
   清理，无需任何人工干预。服务发现语义与裸机完全一致：job watch etcd 拿 comet 列表、
   comet 经 etcd resolver + round_robin 找 logic，因此 **comet/logic/job 之间没有 Service 互联**。
 - **etcd 3 节点**（对应 DESIGN.md「生产：etcd 换 3 节点集群」）：StatefulSet 固定
@@ -50,7 +54,7 @@ kubectl -n danmu create secret generic danmu-secret \
 kubectl apply -k k8s/
 
 # 1.5) 集群有 Ingress Controller 时再补外部入口（域名按需改）
-kubectl apply -f k8s/36-ingress.yaml
+kubectl apply -f k8s/base/36-ingress.yaml
 
 # 2) 看状态（etcd/kafka/clickhouse 起得慢，属正常）
 kubectl -n danmu get pods -o wide
@@ -95,6 +99,35 @@ kubectl -n danmu logs deployment/job | grep 'comet added'   # job 眼里的 come
 
 comet/logic 扩缩容后：job 的 comet 列表由 etcd watch 秒级生效；comet 到 logic 的
 round_robin 地址集由 resolver 自动更新——**没有任何一步需要重启或改配置**。
+
+## 网络策略
+
+`base/40-networkpolicy.yaml` 给九个服务面配了入向白名单（默认随 `kubectl apply -k k8s/` 部署）：
+etcd/Kafka/ClickHouse 只对各自消费者开放；comet→logic :7400、job→comet :7500 这些
+**etcd 发现后按 pod IP 直连的流量**已显式放行（区别于 compose「服务间全靠 Service」的思维）。
+kubelet 探针与 port-forward 不经 NetworkPolicy，不会被误伤；关闭方式：
+
+```bash
+kubectl -n danmu delete networkpolicy --all   # 或从 kustomization 移除该文件
+```
+
+## etcd TLS（可选 overlay）
+
+`overlays/etcd-tls/` 把 etcd 客户端面换成 https，四个业务服务经 `env DANMU_ETCD_*` 挂证书——
+**业务代码无需改 flag**（`etcdreg.NewClient` 在 `DANMU_ETCD_CA` 非空时自动启用 TLS，同一镜像
+既能跑明文也能跑 TLS，单测见 `etcdreg/client_test.go`）。启用步骤见 `tls/README.md`：
+
+```bash
+bash k8s/tls/gen-certs.sh                                # 生成自签证书
+kubectl -n danmu create secret generic danmu-etcd-tls ... # 见脚本末尾提示
+kubectl apply -k k8s/overlays/etcd-tls
+```
+
+## Helm
+
+同一部署的 chart 化版本在 `../helm/danmu/`（`helm install danmu ./helm/danmu -n danmu --create-namespace`），
+参数化面：镜像 tag、comet/logic 副本、HPA、auth、ingress 开关；与 kustomize 基线的差异见
+`../helm/danmu/README.md`。
 
 ## 维护安全
 

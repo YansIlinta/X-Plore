@@ -15,7 +15,8 @@ module：`github.com/YansIlinta/danmu-distributed`
 | `job/` | 消费 Kafka → 从 etcd 发现 comet → 定向 `PushRoom`（替代 Redis Pub/Sub） |
 | `core/` | 三层共享的连接层（Hub 分片锁、Client、限流、过滤、鉴权、指标） |
 | `etcdreg/` | 本项目在 etcd 上的注册/发现约定（key 规范 + 租约续期 + List/Watch），各服务共用 |
-| `k8s/` | Kubernetes 部署清单（kustomize 一次 apply：etcd 3 节点/Kafka/ClickHouse/各服务/HPA/nginx），见 `k8s/README.md` |
+| `k8s/` | Kubernetes 部署基线（kustomize：base/ + overlays/etcd-tls），含 NetworkPolicy/PDB/HPA/Ingress，见 `k8s/README.md` |
+| `helm/` | 同一部署的 Helm chart（values 参数化），见 `helm/danmu/README.md` |
 | `ops/` + `cmd/ops` | Ops Console 后端：旁路观测聚合，不参与消息链路 |
 | `etcd` | 服务发现与注册中心（标准组件，不再是自研 registry） |
 | `cmd/chaintest` | 全链路集成测试：etcd 发现 → PushRoom → WS 下行 → 上行 |

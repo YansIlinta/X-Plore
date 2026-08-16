@@ -69,8 +69,10 @@ etcd(:2379) ── logic(:7400 rpc) ── job ── comet-1(:8080 ws, :7500 rp
 ```
 - 本地/无中间件：comet 不传 `-etcd` 即 standalone，退化为本机过滤+广播，便于冒烟。
 - K8s：`k8s/` 提供整套清单（`kubectl apply -k k8s/`）——etcd 3 节点 StatefulSet、KRaft Kafka、
-  ClickHouse、comet/logic（Deployment + HPA）、job/consumer/ops、nginx。注册地址用 pod IP
-  （downward API `$(POD_IP)`），服务发现语义与裸机一致；细节见 `k8s/README.md`。
+  ClickHouse、comet/logic（Deployment + HPA）、job/consumer/ops、nginx；注册地址用 pod IP
+  （downward API `$(POD_IP)`），服务发现语义与裸机一致。另含 NetworkPolicy 入向白名单、
+  `overlays/etcd-tls`（https 客户端面，`tls/gen-certs.sh` 发证）与 `helm/` chart；
+  细节见 `k8s/README.md`。
 - 生产：etcd 3 节点 + TLS；Comet 连接层可换 epoll 事件循环上百万单机（见 REVIEW.md 演进）。
 
 ## 复用与改动边界
