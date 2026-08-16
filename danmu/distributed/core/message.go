@@ -26,7 +26,7 @@ type UpMessage struct {
 	Content      string `json:"content"`
 	ClientTS     int64  `json:"client_ts"`
 	ClientTSNano int64  `json:"client_ts_ns,omitempty"`
-	Token        string `json:"token,omitempty"` // type=="reauth" 时携带的新会话令牌
+	Token        string `json:"token,omitempty"`     // type=="reauth" 时携带的新会话令牌
 	OffsetMS     int64  `json:"offset_ms,omitempty"` // 点播播放进度
 }
 

@@ -161,4 +161,3 @@ func (wp *WorkerPool) publishRedisBatch(roomID string, data []byte) {
 		log.Printf("[worker] redis publish error: %v", err)
 	}
 }
-

@@ -1,6 +1,6 @@
 # X-Plore · 高并发直播弹幕系统（统合文档）
 
-> 本文档把仓库内分散的 README / DESIGN-goim / REVIEW 等材料，**统合成一份可阅读、可演示、可面试讲解**的「高并发直播弹幕」主项目说明。  
+> 本文档把仓库内分散的 README / DESIGN / REVIEW 等材料，**统合成一份可阅读、可演示、可面试讲解**的「高并发直播弹幕」主项目说明。  
 > 旁支项目（WaveHub 音乐站等）见文末「仓库边界」，不纳入本主线。
 
 ---
@@ -27,7 +27,7 @@
 | 形态 | 目录 | 跨机广播 | 适用场景 |
 |------|------|----------|----------|
 | **单体基线** | `monolith/server/` | Redis Pub/Sub | 开发/面试讲清「长连接 + 扇出」；少依赖快速演示 |
-| **goim 微服务** | `distributed/comet/` + `distributed/logic/` + `distributed/job/` + `distributed/core/` + `distributed/minirpc/` | Kafka → Job → Comet.PushRoom | 连接/逻辑/扇出独立扩缩；对齐 Bilibili goim 思路 |
+| **goim 微服务** | `distributed/comet/` + `distributed/logic/` + `distributed/job/` + `distributed/core/` + `distributed/etcdreg/`（etcd 注册/发现） | Kafka → Job → Comet.PushRoom | 连接/逻辑/扇出独立扩缩；对齐 Bilibili goim 思路 |
 
 **设计取舍（面试高频）**：
 
@@ -66,10 +66,10 @@
 ### 3.2 goim 微服务架构（`comet` / `logic` / `job`）
 
 ```
-                    ┌──────────┐  register/heartbeat
-                    │ registry │◄──────────────── comet-i
+                    ┌──────────┐  register(lease+keepalive)
+                    │   etcd   │◄──────────────── comet-i / logic-i
                     └────▲─────┘
-               discover  │
+                    watch comets
  client ──WS──► comet ──RPC:Logic.OnMessage──► logic ──produce──► Kafka
    ▲                                                              │
    │ RPC:Comet.PushRoom                                           │ consume
@@ -94,8 +94,8 @@
 | **comet** | `distributed/comet/` | 连接层：WS、房间连接、上行转发 Logic、暴露 PushRoom |
 | **logic** | `distributed/logic/` | 无状态逻辑：过滤、msg_id、Kafka produce |
 | **job** | `distributed/job/` | 消费 Kafka，发现全部 Comet 并定向 PushRoom |
-| **registry** | `cmd/registry/` + `distributed/minirpc/registry` | HTTP 注册中心（TTL 租约） |
-| **minirpc** | `distributed/minirpc/` | 自研 RPC：服务发现、一致性哈希 LB、熔断 |
+| **etcd** | 外部组件（compose / `k8s/` 部署） | 注册中心：租约 + 前缀 Get/Watch；客户端封装 `distributed/etcdreg/` |
+| **etcdreg** | `distributed/etcdreg/` | 注册/发现约定：key 规范、续租、List/Watch、可选 TLS |
 | **consumer** | `monolith/consumer/` | Kafka → ClickHouse 落库 |
 | **loadtest** | `monolith/loadtest/` | 多连接压测、E2E 延迟（纳秒透传）、HDR 报告 |
 | **web** | `monolith/web/` | 前端（虚拟滚动弹幕列表） |
@@ -156,7 +156,7 @@
 - 同房间消息跨 worker **可能无序**（弹幕场景可接受）。
 - 单体下关房/踢人控制面默认**本机生效**（管理员广播已走跨机通路）。
 - 超大房间 `sendCh` 满丢消息是有意设计；可调大缓冲或分级广播。
-- 生产可进一步：registry → etcd/consul；minirpc → 标准 gRPC；连接层 epoll 等。
+- 已落地（2026-08）：服务发现换 **etcd**、comet→logic 用 **gRPC 标准 round_robin**（自研 registry/lb/minirpc 全删）、etcd TLS（`k8s/overlays/etcd-tls`）。待挖：连接层 epoll 事件循环（百万单机）、Kafka 多分区长期压测。
 
 ---
 
@@ -171,7 +171,7 @@
 
 standalone comet + loadtest（本地）：200 连接，E2E P50 ~0.6ms / P90 ~1.1ms / P99 ~1.7ms。
 
-goim 链路：`cmd/chaintest` 已验证 registry 发现、Logic.OnMessage、Job→Comet.PushRoom→WS 收包；全链路含 Kafka 可用 `distributed/scripts/run-goim-local.sh` 或 `docker-compose.goim.yml`。
+goim 链路：`distributed/cmd/chaintest` 已验证 etcd 发现、Logic.OnMessage、Job→Comet.PushRoom→WS 收包、trace span 落盘；全链路含 Kafka 可用 `distributed/scripts/run-goim-local.sh` 或 `distributed/docker-compose.goim.yml`。
 
 **压测注意**：压测机与 server 宜分机；高扇出秒级延迟常含 CPU 争抢与下游 write 路径，不全是业务逻辑回归。
 
@@ -180,24 +180,32 @@ goim 链路：`cmd/chaintest` 已验证 registry 发现、Logic.OnMessage、Job�
 ## 6. 目录结构（弹幕主线）
 
 ```
-X-Plore/                          # 仓库根（go module: danmu）
-├── PROJECT.md                    # 本统合文档
-├── README.md                     # 单体运维/压测/调优详版
-├── DESIGN-goim.md                # goim 拆分设计
-├── REVIEW.md                     # 代码审查与修复记录
-│
-├── server/                       # 单体弹幕服务
-├── core/                         # 微服务共享内核
-├── comet/  logic/  job/          # goim 三层
-├── minirpc/                      # 自研 RPC + registry
-├── cmd/
-│   ├── registry/                 # 注册中心进程
-│   └── chaintest/                # 链路集成测试
-├── consumer/                     # Kafka → ClickHouse
-├── loadtest/                     # 压测
-├── web/                          # 前端
-├── pb/                           # protobuf
-├── distributed/scripts/run-goim-local.sh
+X-Plore/
+├── README.md                     # 仓库总览
+└── danmu/                        # 弹幕主线（两个独立 Go module）
+    ├── PROJECT.md                # 本统合文档
+    ├── monolith/                 # 单体基线（一个 server 进程）
+    │   ├── README.md             # 单体运维/压测/调优详版
+    │   ├── REVIEW.md             # 代码审查与修复记录
+    │   ├── server/               # 单体弹幕服务
+    │   ├── consumer/             # Kafka → ClickHouse 落库
+    │   ├── loadtest/             # 架构无关压测
+    │   └── web/                  # 前端
+    └── distributed/              # goim 微服务版
+        ├── DESIGN.md             # goim 拆分设计（含验证状态）
+        ├── ARCHITECTURE_ANALYSIS.md  # Ops Console 勘察报告
+        ├── OPS.md                # Ops Console 使用说明
+        ├── core/                 # 微服务共享内核
+        ├── comet/  logic/  job/  # goim 三层
+        ├── etcdreg/              # etcd 注册/发现封装（含 TLS）
+        ├── cmd/chaintest/        # 链路集成测试
+        ├── ops/  cmd/ops/        # Ops Console 后端 + 前端
+        ├── pb/                   # gRPC 契约
+        ├── web/                  # 联调页（comet 托管）
+        ├── scripts/run-goim-local.sh
+        ├── docker-compose.goim.yml / nginx.conf
+        ├── k8s/                  # K8s 清单（base/ + overlays/etcd-tls）
+        └── helm/danmu/           # Helm chart
 ├── docker-compose.yml            # 单体 + 中间件
 ├── docker-compose.goim.yml       # 微服务全链路
 ├── Dockerfile.server / .consumer / .goim
@@ -267,8 +275,8 @@ curl http://localhost:8081/metrics
 1. **场景**：直播间百万长连接，弹幕要低延迟、可丢、可水平扩展。  
 2. **单体**：WS + 分片 Hub + worker 批量 + Redis 实时 + Kafka 落库，10k 连接低扇出 P90 ~5ms。  
 3. **瓶颈**：Redis Pub/Sub 全网扩散、Prometheus 高基数标签、连接注册单点等——对照 `REVIEW.md` 修过。  
-4. **演进**：按 goim 拆 Comet/Logic/Job，Kafka 削峰 + 定向 PushRoom；自研 minirpc（发现 + 一致性哈希 + 熔断）。  
-5. **边界**：弹幕允许丢与乱序；控制面跨机、registry 生产级替换、单机百万连接还需内核/epoll 层继续挖。
+4. **演进**：按 goim 拆 Comet/Logic/Job，Kafka 削峰 + 定向 PushRoom；服务发现自研 registry/lb → 2026-08 换 **etcd + gRPC round_robin**（标准组件，删掉全部自研 RPC 骨架）。  
+5. **边界**：弹幕允许丢与乱序；控制面跨机与 etcd TLS 已落地（k8s overlay）；单机百万连接还需内核/epoll 层继续挖。
 
 ---
 
@@ -277,10 +285,9 @@ curl http://localhost:8081/metrics
 | 文档 | 内容 |
 |------|------|
 | **PROJECT.md（本文）** | 统合总览：架构、取舍、启动、边界 |
-| **`INTERVIEW.md`** | 面试口述：60 秒 / 3 分钟稿、追问速答 |
-| `README.md` | 单体详解、压测剧本、内核调优、排障 |
-| `DESIGN-goim.md` | 微服务拆分契约与数据流 |
-| `REVIEW.md` | 问题清单、修复、压测前后对比 |
+| `danmu/monolith/README.md` | 单体详解、压测剧本、内核调优、排障 |
+| `danmu/distributed/DESIGN.md` | 微服务拆分契约与数据流、验证状态 |
+| `danmu/monolith/REVIEW.md` | 问题清单、修复、压测前后对比 |
 
 ---
 
@@ -289,12 +296,12 @@ curl http://localhost:8081/metrics
 - [x] 单体可构建、可压测；H1–H2 / M1–M6 / L1–L3 等审查项已处理一轮  
 - [x] core 单测（AC、令牌、令牌桶）  
 - [x] standalone comet + loadtest  
-- [x] goim chaintest（registry / Logic / PushRoom→WS）  
+- [x] goim chaintest（etcd 发现 / Logic / PushRoom→WS / trace span）  
 - [ ] 有 Kafka 环境下全链路长时间压测（按需用 compose / run-goim-local 补）  
 
 ---
 
-*统合目的：打开一份文档即可理解「这是什么项目、怎么跑、为什么这样设计、讲到哪里算讲完」。细节实现与命令仍以 `README.md` / `DESIGN-goim.md` 为准。*
+*统合目的：打开一份文档即可理解「这是什么项目、怎么跑、为什么这样设计、讲到哪里算讲完」。细节实现与命令仍以 `danmu/monolith/README.md` / `danmu/distributed/DESIGN.md` 为准。*
 
 ---
 

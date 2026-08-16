@@ -166,9 +166,10 @@ func TestHubCounterConsistency(t *testing.T) {
 
 // TestWritePumpCloseRace 验证 WritePump 读关闭状态与 Close 并发写之间没有数据竞态
 // （-race 下运行）。覆盖两种交错：
-//   A. 多个管理面并发 Close（closeOnce 串行化，atomic 发布关闭状态）
-//   B. 非 Close 路径先 cancel（模拟 ReadPump defer / 父 ctx 取消唤醒 WritePump），
-//      同时管理面并发 Close——这是历史上真实存在的竞态窗口（裸字段读写无同步）。
+//
+//	A. 多个管理面并发 Close（closeOnce 串行化，atomic 发布关闭状态）
+//	B. 非 Close 路径先 cancel（模拟 ReadPump defer / 父 ctx 取消唤醒 WritePump），
+//	   同时管理面并发 Close——这是历史上真实存在的竞态窗口（裸字段读写无同步）。
 func TestWritePumpCloseRace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
