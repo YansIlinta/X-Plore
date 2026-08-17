@@ -7,20 +7,25 @@
 //   - 帧层：解析 FIN/opcode/长度；处理 ping→pong、close；文本帧忽略（空闲测试无业务）
 //   - 不做 TLS（边缘终止；gnet 无内置 TLS，自备是已知结论）
 //
-// 用法：wsd -addr :19000 -stats :19001
+// 多端口（-ports N）：客户端单 IP 的临时端口空间约 28k，但 Linux 四元组唯一性
+// 允许「同一源端口 × 不同目标端口」并存，因此监听多个端口即可让单客户端打到
+// 10 万级并发连接（28k × 64 = 1.8M 容量）。
+//
+// 用法：wsd -addr :19000 -ports 64
 package main
 
 import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/panjf2000/gnet/v2"
 )
@@ -34,20 +39,7 @@ type wsState struct {
 
 type wsServer struct {
 	gnet.BuiltinEventEngine
-	connCount atomic.Int64
-	statsAddr string
-}
-
-func (s *wsServer) OnBoot(eng gnet.Engine) gnet.Action {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]int64{"conns": s.connCount.Load()})
-	})
-	go http.ListenAndServe(s.statsAddr, mux)
-	return gnet.None
+	connCount *atomic.Int64
 }
 
 func (s *wsServer) OnOpen(c gnet.Conn) ([]byte, gnet.Action) {
@@ -215,22 +207,60 @@ func trimSpace(b []byte) string {
 }
 
 func main() {
-	addr := flag.String("addr", ":19000", "listen address")
-	statsAddr := flag.String("stats", ":19001", "stats HTTP address")
+	addr := flag.String("addr", ":19000", "base listen address")
+	ports := flag.Int("ports", 1, "listen port count（多端口绕开客户端单 IP 临时端口上限）")
 	flag.Parse()
 
-	srv := &wsServer{statsAddr: *statsAddr}
-	log.Printf("[wsd] starting on %s (stats %s)", *addr, *statsAddr)
-	// gnet v2 要求带协议前缀的地址
-	listenAddr := *addr
-	if !strings.HasPrefix(listenAddr, "tcp://") {
-		listenAddr = "tcp://" + listenAddr
+	basePort := portOf(*addr)
+	if basePort == 0 {
+		log.Fatalf("bad addr %q", *addr)
 	}
-	if err := gnet.Run(srv, listenAddr,
-		gnet.WithMulticore(false),
-		gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-		gnet.WithReadBufferCap(32*1024),
-	); err != nil {
-		log.Fatalf("gnet.Run: %v", err)
+
+	var connCount atomic.Int64
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// 每个端口一个 gnet engine（单进程多 reactor）
+	for i := 0; i < *ports; i++ {
+		srv := &wsServer{connCount: &connCount}
+		listenAddr := fmt.Sprintf("tcp://:%d", basePort+i)
+		go func(addr string, s *wsServer) {
+			if err := gnet.Run(s, addr,
+				gnet.WithMulticore(false),
+				gnet.WithTCPNoDelay(gnet.TCPNoDelay),
+				gnet.WithReadBufferCap(32*1024),
+			); err != nil {
+				log.Printf("[wsd] %s: %v", addr, err)
+			}
+		}(listenAddr, srv)
 	}
+	log.Printf("[wsd] starting %d listeners on :%d..:%d", *ports, basePort, basePort+*ports-1)
+
+	<-sigCh
+	log.Printf("[wsd] shutting down, conns=%d", connCount.Load())
+	os.Exit(0)
+}
+
+func portOf(addr string) int {
+	addr = strings.TrimPrefix(addr, "tcp://")
+	_, portStr, err := netSplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	p := 0
+	for _, r := range portStr {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		p = p*10 + int(r-'0')
+	}
+	return p
+}
+
+func netSplitHostPort(addr string) (string, string, error) {
+	idx := strings.LastIndexByte(addr, ':')
+	if idx < 0 {
+		return "", "", fmt.Errorf("missing port")
+	}
+	return addr[:idx], addr[idx+1:], nil
 }

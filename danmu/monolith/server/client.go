@@ -18,17 +18,19 @@ const (
 	pingPeriod     = 30 * time.Second
 	maxMessageSize = 4096
 	sendChSize     = 512
-	hpSendChSize   = 64 // 高优通道容量：writePump 优先排空，正常远不会满
+	hpSendChSize   = 64  // 高优通道容量：writePump 优先排空，正常远不会满
+	ackChSize      = 256 // ack 通道容量：非阻塞投递，满则计数丢弃（绝不阻塞 readPump）
 )
 
 // Client 代表一个 WebSocket 连接
-// writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh/hpSendCh 串行写出
+// writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh/hpSendCh/ackCh 串行写出
 // 禁止其他 goroutine 直接调用 conn.WriteMessage
 type Client struct {
 	hub      *Hub
 	conn     *websocket.Conn
 	sendCh   chan []byte // 普通外发通道，writePump 是唯一消费者
 	hpSendCh chan []byte // 高优先级外发通道（醒目留言等）：writePump 优先排空
+	ackCh    chan []byte // ack 控制通道：writePump 最先排空；非阻塞投递（满则计数丢弃）
 	uid      string
 	roomID   string
 	limiter  *TokenBucket
@@ -53,6 +55,7 @@ func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx con
 		conn:     conn,
 		sendCh:   make(chan []byte, sendChSize),
 		hpSendCh: make(chan []byte, hpSendChSize),
+		ackCh:    make(chan []byte, ackChSize),
 		uid:      uid,
 		roomID:   roomID,
 		limiter:  NewTokenBucket(20, 50),
@@ -188,16 +191,19 @@ func (c *Client) readPump() {
 	}
 }
 
-// sendAck 回一条消息级 ack。走普通通道即可（ack 量级=客户端发送速率），
-// 阻塞式投递保证 ack 不丢：writePump 批量排空很快，正常不会久等。
+// sendAck 回一条消息级 ack。走独立 ack 通道（writePump 最先排空），
+// 非阻塞投递：高扇出下发送者的普通通道可能被广播灌满，ack 绝不能阻塞 readPump
+// （阻塞会导致整条连接的上行死锁——曾实测 397/504 goroutine 卡死在阻塞 ack）。
+// 满则计入 danmu_ack_drops_total（客户端仍可凭广播回声确认送达）。
 func (c *Client) sendAck(msgID string) {
 	ack, err := json.Marshal([]map[string]string{{"type": "ack", "msg_id": msgID}})
 	if err != nil {
 		return
 	}
 	select {
-	case c.sendCh <- ack:
-	case <-c.ctx.Done():
+	case c.ackCh <- ack:
+	default:
+		metricAckDrops.Inc()
 	}
 }
 
@@ -284,8 +290,14 @@ func (c *Client) writePump() {
 				time.Now().Add(writeWait))
 			return
 
+		case ack := <-c.ackCh:
+			// ack 最先排空（控制面优先于所有内容通道）
+			if err := c.writeBatched(c.ackCh, ack); err != nil {
+				return
+			}
+
 		case message := <-c.hpSendCh:
-			// 高优通道优先排空
+			// 高优通道次优先排空
 			if err := c.writeBatched(c.hpSendCh, message); err != nil {
 				return
 			}

@@ -42,4 +42,10 @@ var (
 		Name: "danmu_flagged_total",
 		Help: "房间词库 flag 模式命中的消息累计数（放行但打标）",
 	})
+
+	// ack 通道满时的丢弃计数：绝不阻塞 readPump（阻塞会导致高扇出下上行死锁）
+	metricAckDrops = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "danmu_ack_drops_total",
+		Help: "ack 因客户端 ack 通道满而丢弃的累计数（客户端可凭广播回声确认）",
+	})
 )

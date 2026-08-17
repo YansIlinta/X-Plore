@@ -1,10 +1,17 @@
 // loader 是 P8 实验的压测端：拉起被测 WS 服务器（epoll 版或 gorilla 版），
 // 并发建立 N 条空闲长连接，测量建连 P99 与服务器进程 RSS。
 //
+// 多端口：-ports N 时连接轮询分布到 base-port..base-port+N-1（绕开客户端单 IP
+// 临时端口上限 28k：同一源端口对不同目标端口可并存，四元组唯一）。
+//
 // 用法：
 //
-//	loader -server-bin ./wsd -server-args "-addr :19000 -stats :19001" \
-//	       -ws-url ws://localhost:19000 -conns 10000 -probe 5000
+//	# epoll 版（loader 负责拉起单进程多端口 server）
+//	loader -server-bin ./wsd -server-args "-addr :19000 -ports 64" \
+//	       -conns 100000 -ports 64
+//
+//	# gorilla 基线（多实例由 wrapper 脚本拉起，loader 只负责建连与测 RSS）
+//	loader -no-spawn -pids-file /tmp/srv.pids -conns 100000 -ports 64
 //
 // 预注册判据（见 RESULT.md）：RSS 降 ≥40% 且建连 P99 不劣化 → CONTINUE；否则 NEGATIVE。
 package main
@@ -25,46 +32,48 @@ import (
 )
 
 func main() {
-	serverBin := flag.String("server-bin", "", "被测服务器二进制路径")
+	serverBin := flag.String("server-bin", "", "被测服务器二进制路径（-no-spawn 时忽略）")
 	serverArgs := flag.String("server-args", "", "被测服务器参数（空格分隔）")
-	wsURL := flag.String("ws-url", "", "WebSocket URL（loader 用 net.Dial 模拟握手，仅需 host:port 语义）")
+	host := flag.String("host", "localhost", "被测服务器主机")
+	basePort := flag.Int("base-port", 19000, "被测服务器起始端口")
+	ports := flag.Int("ports", 1, "被测服务器端口数（连接轮询分布，绕开单 IP 临时端口上限）")
 	conns := flag.Int("conns", 5000, "连接数")
-	workers := flag.Int("workers", 100, "并发建连协程数")
+	workers := flag.Int("workers", 200, "并发建连协程数")
 	settle := flag.Duration("settle", 10*time.Second, "建连后静置时长（让 RSS 稳定）")
 	reqPath := flag.String("req-path", "/ws?uid=bench&room=room-1&token=danmu-secret-token", "WS 握手请求路径（monolith 需要 uid/room/token）")
+	noSpawn := flag.Bool("no-spawn", false, "不拉起 server（已由外部启动），仅建连与测 RSS")
+	pidsFile := flag.String("pids-file", "", "服务器进程 pid 列表文件（逗号/换行分隔，-no-spawn 时用于 RSS 汇总）")
 	flag.Parse()
 
-	if *serverBin == "" || *wsURL == "" {
-		log.Fatal("server-bin 与 ws-url 必填")
-	}
-	host := *wsURL
-	host = strings.TrimPrefix(host, "ws://")
-	host = strings.TrimPrefix(host, "wss://")
-	if i := strings.Index(host, "/"); i >= 0 {
-		host = host[:i]
+	if !*noSpawn && *serverBin == "" {
+		log.Fatal("server-bin 必填（或 -no-spawn）")
 	}
 
-	// 1) 拉起被测服务器
-	args := []string{}
-	if *serverArgs != "" {
-		args = strings.Fields(*serverArgs)
+	// 1) 拉起被测服务器（可选）
+	var spawnedPid int
+	if !*noSpawn {
+		args := []string{}
+		if *serverArgs != "" {
+			args = strings.Fields(*serverArgs)
+		}
+		cmd := exec.Command(*serverBin, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			log.Fatalf("start server: %v", err)
+		}
+		defer func() {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}()
+		spawnedPid = cmd.Process.Pid
+		log.Printf("[loader] server pid=%d", spawnedPid)
 	}
-	cmd := exec.Command(*serverBin, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		log.Fatalf("start server: %v", err)
-	}
-	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-	}()
-	log.Printf("[loader] server pid=%d", cmd.Process.Pid)
 
 	// 2) 等端口可连
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", host, time.Second)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", *host, *basePort), time.Second)
 		if err == nil {
 			conn.Close()
 			break
@@ -72,7 +81,7 @@ func main() {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// 3) 并发建连（模拟 WS 握手请求，服务器应答后即空闲）
+	// 3) 并发建连（模拟 WS 握手请求，服务器应答后即空闲），连接轮询分布到各端口
 	var mu sync.Mutex
 	var latencies []time.Duration
 	var failCount int32
@@ -81,8 +90,9 @@ func main() {
 
 	dialOne := func(i int) {
 		defer wg.Done()
+		dstPort := *basePort + i%*ports
 		start := time.Now()
-		conn, err := net.DialTimeout("tcp", host, 10*time.Second)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", *host, dstPort), 10*time.Second)
 		if err != nil {
 			mu.Lock()
 			failCount++
@@ -90,9 +100,9 @@ func main() {
 			return
 		}
 		// 发 WS 握手请求
-		req := "GET " + *reqPath + " HTTP/1.1\r\nHost: " + host + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+		req := "GET " + *reqPath + " HTTP/1.1\r\nHost: " + fmt.Sprintf("%s:%d", *host, dstPort) + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
 			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if _, err := conn.Write([]byte(req)); err != nil {
 			conn.Close()
 			mu.Lock()
@@ -101,7 +111,7 @@ func main() {
 			return
 		}
 		// 读 101 应答
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		reader := bufio.NewReader(conn)
 		status, err := reader.ReadString('\n')
 		if err != nil || !strings.Contains(status, " 101 ") {
@@ -125,20 +135,20 @@ func main() {
 		mu.Unlock()
 	}
 
-	log.Printf("[loader] dialing %d conns...", *conns)
+	log.Printf("[loader] dialing %d conns across %d ports...", *conns, *ports)
 	startAll := time.Now()
-	ch := make(chan struct{})
+	ch := make(chan int, *workers*4)
 	go func() {
 		for i := 0; i < *conns; i++ {
-			ch <- struct{}{}
+			ch <- i
 		}
 		close(ch)
 	}()
 	for w := 0; w < *workers; w++ {
 		go func() {
-			for range ch {
+			for i := range ch {
 				wg.Add(1)
-				dialOne(0)
+				dialOne(i)
 			}
 		}()
 	}
@@ -147,7 +157,16 @@ func main() {
 
 	// 4) 静置，读 RSS
 	time.Sleep(*settle)
-	rssKB := readRSS(cmd.Process.Pid)
+	var rssKB int64
+	if *noSpawn {
+		for _, pid := range readPIDs(*pidsFile) {
+			if v := readRSS(pid); v > 0 {
+				rssKB += v
+			}
+		}
+	} else {
+		rssKB = readRSS(spawnedPid)
+	}
 
 	// 5) 报告
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
@@ -159,17 +178,45 @@ func main() {
 		return latencies[idx]
 	}
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Printf("SERVER      : %s\n", *serverBin)
+	fmt.Printf("SERVER      : %s\n", serverBinOrPids(*noSpawn, *pidsFile))
 	fmt.Printf("CONNS       : %d (ok=%d fail=%d)\n", *conns, len(connPool), failCount)
 	fmt.Printf("DIAL RATE   : %.0f conns/s (%.2fs)\n", float64(len(connPool))/elapsed.Seconds(), elapsed.Seconds())
 	fmt.Printf("CONNECT P50 : %s\n", p(0.5))
 	fmt.Printf("CONNECT P90 : %s\n", p(0.9))
 	fmt.Printf("CONNECT P99 : %s\n", p(0.99))
-	fmt.Printf("RSS (pid %d): %.1f MB\n", cmd.Process.Pid, float64(rssKB)/1024)
+	if rssKB >= 0 {
+		fmt.Printf("RSS         : %.1f MB\n", float64(rssKB)/1024)
+	} else {
+		fmt.Printf("RSS         : N/A\n")
+	}
 	fmt.Printf("LIVE CONNS  : %d\n", len(connPool))
 	fmt.Println(strings.Repeat("=", 60))
+}
 
-	// 6) 报告完毕退出（defer 会 kill server；连接随进程退出关闭）
+func serverBinOrPids(noSpawn bool, pidsFile string) string {
+	if !noSpawn {
+		return "spawned"
+	}
+	return "external (pids-file " + pidsFile + ")"
+}
+
+func readPIDs(path string) []int {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, tok := range strings.FieldsFunc(string(data), func(r rune) bool {
+		return r == ',' || r == '\n' || r == ' '
+	}) {
+		if v, err := strconv.Atoi(tok); err == nil {
+			pids = append(pids, v)
+		}
+	}
+	return pids
 }
 
 func readRSS(pid int) int64 {

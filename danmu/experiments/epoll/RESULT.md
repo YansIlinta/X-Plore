@@ -46,3 +46,29 @@ go build -o /tmp/wsd ./cmd/wsd && go build -o /tmp/wsd-loader ./cmd/loader
 /tmp/wsd-loader -server-bin /tmp/danmu-server-new -server-args "-addr :19002 -id srvA" \
   -ws-url ws://localhost:19002 -conns 10000 -settle 10s
 ```
+
+## 远程实测（SeetaCloud 48 核容器，cgroup 限 12 CPU，440G 内存）
+
+> 2026-08-17 追加。多端口方案：客户端单 IP 临时端口上限 ~28k，Linux 四元组唯一性
+> 允许「同一源端口 × 不同目标端口」并存，server 监听 64 端口即可让单客户端打到 10 万级。
+
+| 场景 | 连接 | RSS | 建连 P50/P90/P99 |
+|---|---|---|---|
+| **wsd（gnet）单进程 × 64 端口** | **100,000**（0 失败，5.4 万/s） | **63.0 MB**（~630B/连接） | 2.3 / 6.6 / 72.3 ms |
+| wsd 单进程 × 1 端口 | 28,000 | 24.2 MB | 13.3 / 192.9 / 389.3 ms |
+| monolith（gorilla）单进程 | 28,000 | 41.6 MB | 33.7 / 191.0 / 387.0 ms |
+| monolith × 64 进程（多端口） | 98,437/100,000 | **1,789.1 MB（合计）** | 5.7 / 73.1 / 86.8 ms |
+
+**100k 结论（同机同构）：gnet 单进程 63 MB vs gorilla 64 进程合计 1.79 GB——内存差 28 倍；
+同口径单进程 28k：RSS -41.8%（24.2 vs 41.6MB）、建连 P50 -60%（13.3 vs 33.7ms）。
+预注册判据（RSS ≥40% 且 P99 不劣化）在 10k、28k、100k 三个量级全部命中 → CONTINUE。**
+
+## 附：远程实测发现的真实缺陷（已修复）
+
+100k 空闲测试后的 10k 连接带流量压测在远程暴露 P3 引入的死锁：
+`sendAck` 阻塞式投递在高扇出下把发送者 readPump 卡死（goroutine dump：397/504
+卡在 client.go sendAck），导致连接雪崩。修复：ack 改走独立 `ackCh`（writePump 最先
+排空）+ 非阻塞投递 + `danmu_ack_drops_total` 计数。修复后同机复测：
+10k 连接空闲全成（0 失败 0 丢）、1000 连接带流量 Ack Rate 100%、0 丢弃、
+E2E P50 6.0ms / P90 14.2ms（受客户端 JSON 接收端 ~75 万 msg/s 上限约束，
+10k 连接 × 1 msg/s 的满扇出需更强压测端）。
