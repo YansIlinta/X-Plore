@@ -124,6 +124,10 @@ body {
 }
 
 /* ---------- 管理面板 ---------- */
+/* 管理抽屉打开时，正文整体让位，避免遮住输入栏/发送按钮 */
+body.admin-open { margin-right: 340px; }
+body.admin-open .admin-drawer { width: 340px; }
+
 .admin-drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: 340px;
   background: var(--panel); border-left: 1px solid var(--border);
@@ -674,8 +678,10 @@ function pollPeaks() {
 
 // ---- 管理面板（P4：词库 / 慢速模式 / 踢人 / 关房）----
 function toggleAdmin() {
-  document.getElementById('adminDrawer').classList.toggle('open');
-  if (document.getElementById('adminDrawer').classList.contains('open')) {
+  const drawer = document.getElementById('adminDrawer');
+  drawer.classList.toggle('open');
+  document.body.classList.toggle('admin-open', drawer.classList.contains('open'));
+  if (drawer.classList.contains('open')) {
     document.getElementById('adminRoom').textContent = document.getElementById('roomInput').value.trim();
     adminLoadWords();
   }
