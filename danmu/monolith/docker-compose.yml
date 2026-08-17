@@ -139,6 +139,15 @@ services:
     networks:
       - danmu
 
+  # Grafana Pyroscope 持续剖析（可选）：server 设 PYROSCOPE_ADDR=http://pyroscope:4040
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - "4040:4040"
+    restart: unless-stopped
+    networks:
+      - danmu
+
 volumes:
   kafka_data:
   clickhouse_data:

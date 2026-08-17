@@ -57,6 +57,22 @@ func NewDB(addr, database, username, password string) (*DB, error) {
 		return nil, fmt.Errorf("create table: %w", err)
 	}
 
+	// 弹幕密度物化视图：秒级 COUNT，供高能进度条/峰值打点查询。
+	// 只捕获 MV 创建后的新 INSERT；历史数据需按需回填（见 consumer/sql/peaks.sql）。
+	// 查询失败不阻断启动（老集群可无此视图，server 会回退到直接 GROUP BY）。
+	_, _ = db.Exec(`
+		CREATE MATERIALIZED VIEW IF NOT EXISTS danmu_count_per_sec
+		ENGINE = SummingMergeTree()
+		PARTITION BY toYYYYMMDD(ts_bucket)
+		ORDER BY (room_id, ts_bucket)
+		AS SELECT
+			room_id,
+			toStartOfSecond(fromUnixTimestamp64Milli(server_ts)) AS ts_bucket,
+			count() AS cnt
+		FROM danmu_history
+		GROUP BY room_id, ts_bucket
+	`)
+
 	return &DB{db: db}, nil
 }
 

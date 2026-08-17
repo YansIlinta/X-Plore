@@ -205,13 +205,22 @@ func (a *API) handleRooms(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET/DELETE /api/v1/rooms/{room_id}
+// GET/DELETE /api/v1/rooms/{room_id}[/{action}]
 func (a *API) handleRoomByID(w http.ResponseWriter, r *http.Request) {
 	// 提取路径参数
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/rooms/")
-	roomID := strings.TrimSuffix(path, "/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	roomID := ""
+	if len(parts) > 0 {
+		roomID = parts[0]
+	}
 	if roomID == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_ROOM_ID", "room_id is required")
+		return
+	}
+	// /api/v1/rooms/{id}/peaks
+	if len(parts) >= 2 && parts[1] == "peaks" {
+		a.handlePeaks(w, r, roomID)
 		return
 	}
 
@@ -253,6 +262,55 @@ func (a *API) handleRoomByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only GET/DELETE allowed")
 	}
+}
+
+// handlePeaks GET /api/v1/rooms/{id}/peaks?from=&to=&bucket=sec|min&top_k=
+// 返回弹幕密度序列与高能点（峰值打点）。
+func (a *API) handlePeaks(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only GET allowed")
+		return
+	}
+	// historyDB 可能只实现 HistoryQuerier；峰值需要 HistoryDB
+	peaksDB, ok := a.historyDB.(interface {
+		QueryPeaks(roomID string, fromMS, toMS int64, bucket string, topK int) ([]PeakPoint, []PeakPoint, error)
+	})
+	if !ok || a.historyDB == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"room_id": roomID,
+			"series":  []PeakPoint{},
+			"peaks":   []PeakPoint{},
+		})
+		return
+	}
+	fromMS, _ := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
+	toMS, _ := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
+	bucket := r.URL.Query().Get("bucket")
+	if bucket == "" {
+		bucket = "sec"
+	}
+	topK, _ := strconv.Atoi(r.URL.Query().Get("top_k"))
+	if topK <= 0 {
+		topK = 10
+	}
+	series, peaks, err := peaksDB.QueryPeaks(roomID, fromMS, toMS, bucket, topK)
+	if err != nil {
+		log.Printf("[API] peaks query error: %v", err)
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to query peaks")
+		return
+	}
+	if series == nil {
+		series = []PeakPoint{}
+	}
+	if peaks == nil {
+		peaks = []PeakPoint{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"room_id": roomID,
+		"bucket":  bucket,
+		"series":  series,
+		"peaks":   peaks,
+	})
 }
 
 // POST /api/v1/broadcast - 管理员广播

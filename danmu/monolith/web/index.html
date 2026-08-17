@@ -42,6 +42,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .pinned-bar { background: #16213e; padding: 6px 20px; border-top: 1px solid #e94560; display: flex; flex-wrap: wrap; gap: 8px; }
 .pinned-bar:empty { display: none; }
 .pinned-item { background: #533483; color: #ffd700; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
+
+/* 高能进度条：峰值打点 */
+.peaks-bar { background: #0f3460; height: 28px; position: relative; border-bottom: 1px solid #16213e; margin: 0; }
+.peaks-bar .peak-mark { position: absolute; top: 2px; width: 10px; height: 24px; background: #e94560; border-radius: 2px; cursor: pointer; opacity: 0.85; }
+.peaks-bar .peak-mark:hover { opacity: 1; background: #ff6b81; }
+.peaks-bar .peak-label { position: absolute; left: 8px; top: 6px; font-size: 11px; color: #a0a0b0; }
 </style>
 </head>
 <body>
@@ -58,6 +64,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
   <span>在线人数: <span id="onlineCount">-</span></span>
   <span>房间: <span id="roomName">-</span></span>
 </div>
+
+<div class="peaks-bar" id="peaksBar"><span class="peak-label">高能进度条（需 ClickHouse 历史）</span></div>
 
 <div class="messages" id="messages"></div>
 
@@ -407,7 +415,8 @@ function refreshSessionToken() {
 function startPolling() {
   stopPolling();
   pollRoomInfo();
-  pollTimer = setInterval(pollRoomInfo, 3000);
+  pollPeaks();
+  pollTimer = setInterval(() => { pollRoomInfo(); }, 3000);
 }
 
 function stopPolling() {
@@ -423,6 +432,39 @@ function pollRoomInfo() {
   .then(r => r.json())
   .then(data => {
     document.getElementById('onlineCount').textContent = data.online_count || 0;
+  })
+  .catch(() => {});
+}
+
+// 高能进度条：拉取峰值点并渲染标记
+function pollPeaks() {
+  const room = document.getElementById('roomInput').value.trim();
+  const token = document.getElementById('tokenInput').value.trim();
+  fetch(`/api/v1/rooms/${encodeURIComponent(room)}/peaks?bucket=sec&top_k=10`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  .then(r => r.json())
+  .then(data => {
+    const bar = document.getElementById('peaksBar');
+    bar.innerHTML = '<span class="peak-label">高能进度条</span>';
+    const peaks = data.peaks || [];
+    const series = data.series || [];
+    if (peaks.length === 0) {
+      bar.innerHTML += '<span class="peak-label" style="left:120px">（暂无峰值）</span>';
+      return;
+    }
+    const minTS = series.length ? series[0].ts : peaks[0].ts;
+    const maxTS = series.length ? series[series.length - 1].ts : peaks[peaks.length - 1].ts;
+    const span = Math.max(1, maxTS - minTS);
+    peaks.forEach(p => {
+      const pct = ((p.ts - minTS) / span) * 100;
+      const mark = document.createElement('div');
+      mark.className = 'peak-mark';
+      mark.style.left = `calc(${pct}% - 5px)`;
+      mark.title = `高能 @ ${new Date(p.ts * 1000).toLocaleTimeString()} count=${p.count}`;
+      mark.onclick = () => addSystemMsg(`跳到高能点 ${new Date(p.ts * 1000).toLocaleTimeString()} (count=${p.count})`);
+      bar.appendChild(mark);
+    });
   })
   .catch(() => {});
 }

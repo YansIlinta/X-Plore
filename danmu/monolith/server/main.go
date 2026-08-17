@@ -137,6 +137,15 @@ func main() {
 		}
 	}()
 
+	// 可选持续剖析：PYROSCOPE_ADDR 非空时接入 Grafana Pyroscope（如 http://localhost:4040）
+	if addr := os.Getenv("PYROSCOPE_ADDR"); addr != "" {
+		if err := startPyroscope(addr, *serverID); err != nil {
+			log.Printf("[WARN] pyroscope start failed: %v", err)
+		} else {
+			log.Printf("[main] pyroscope enabled → %s", addr)
+		}
+	}
+
 	// 启动 HTTP Server
 	go func() {
 		log.Printf("[main] HTTP server listening on %s", *addr)
