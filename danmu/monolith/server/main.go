@@ -33,6 +33,7 @@ func main() {
 	chPassword := flag.String("clickhouse-password", "", "ClickHouse password")
 	histSize := flag.Int("hist-size", 100, "每房间热历史条数（断线重连补发/进房拉最近 N 条）")
 	histTTL := flag.Duration("hist-ttl", 5*time.Minute, "热历史 TTL，超时未写入视为新会话")
+	idemTTL := flag.Duration("idem-ttl", 30*time.Second, "客户端 msg_id 幂等窗口，窗口内重复 msg_id 只广播一次")
 	flag.Parse()
 
 	// 在启动任何连接前设置会话 TTL（运行期只读）
@@ -55,6 +56,7 @@ func main() {
 	hub := NewHub(*serverID, *mqMode, ctx, cancel)
 	hub.tokenIssuer = NewTokenIssuer(authToken)
 	hub.hist = NewRoomHist(*histSize, *histTTL)
+	hub.idem = NewMsgIDSet(*idemTTL)
 	go hub.hist.SweepLoop(ctx, time.Minute)
 	go hub.Run()
 

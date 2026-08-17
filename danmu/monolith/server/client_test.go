@@ -7,9 +7,9 @@ import (
 
 func TestMergeJSONArrays(t *testing.T) {
 	cases := []struct {
-		name   string
-		in     [][]byte
-		want   string
+		name string
+		in   [][]byte
+		want string
 	}{
 		{"single", [][]byte{[]byte(`[{"a":1}]`)}, `[{"a":1}]`},
 		{"multi", [][]byte{[]byte(`[{"a":1}]`), []byte(`[{"b":2},{"c":3}]`)}, `[{"a":1},{"b":2},{"c":3}]`},

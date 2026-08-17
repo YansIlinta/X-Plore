@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -29,16 +30,21 @@ type UpMessage struct {
 	Content      string `json:"content"`
 	ClientTS     int64  `json:"client_ts"`
 	ClientTSNano int64  `json:"client_ts_ns"`
+	MsgID        string `json:"msg_id,omitempty"`   // 幂等 ID（服务端回 ack）
+	Priority     int    `json:"priority,omitempty"` // 0=普通，1=高优先级
 }
 
 type DownMessage struct {
 	Type         string `json:"type"`
+	MsgID        string `json:"msg_id,omitempty"`
 	RoomID       string `json:"room_id"`
 	UID          string `json:"uid"`
 	Content      string `json:"content"`
 	ClientTS     int64  `json:"client_ts"`
 	ClientTSNano int64  `json:"client_ts_ns"`
 	ServerTS     int64  `json:"server_ts"`
+	Priority     int    `json:"priority,omitempty"`
+	PinUntil     int64  `json:"pin_until,omitempty"`
 }
 
 // --- 指标收集 ---
@@ -64,6 +70,11 @@ type Metrics struct {
 	sendCount atomic.Int64
 	recvCount atomic.Int64
 	dropCount atomic.Int64
+
+	// 可靠性层（P3：服务端 ack / 高优先级通道）
+	ackCount atomic.Int64 // 收到的服务端 ack 数（按发送 msg_id 计数）
+	sentHigh atomic.Int64 // 发送的高优先级消息数
+	recvHigh atomic.Int64 // 收到的高优先级消息数（含自己回声）
 
 	// 延迟层（端到端，微秒），分片降低锁竞争
 	e2eShards []*e2eShard
@@ -158,6 +169,7 @@ func main() {
 	outputJSON := flag.String("output-json", "", "Output JSON report to file")
 	outputCSV := flag.String("output-csv", "", "Output CSV report to file")
 	reconnectCheck := flag.Bool("reconnect-check", false, "运行重连补发校验（单连接短场景）：校验通过/失败后退出")
+	priorityRatio := flag.Float64("priority-ratio", 0, "发送消息中高优先级(priority=1)的比例 0~1（0=全部普通）")
 	flag.Parse()
 
 	serverList := strings.Split(*servers, ",")
@@ -273,7 +285,7 @@ func main() {
 
 		go func(connIdx int, uid, roomID, serverURL string) {
 			defer wg.Done()
-			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime)
+			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime, *priorityRatio)
 		}(i, uid, roomID, serverURL)
 
 		time.Sleep(rampDelay)
@@ -437,7 +449,7 @@ func runReconnectCheck(serverURL, token string) error {
 }
 
 // runClient 单个压测连接
-func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time) {
+func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time, priorityRatio float64) {
 	// 建连
 	wsURL := fmt.Sprintf("%s/ws?uid=%s&room=%s&token=%s", serverURL, uid, roomID, token)
 
@@ -503,6 +515,12 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 				switch msg.Type {
 				case "rate_limited", "session_token", "reauth_ack":
 					continue
+				case "ack":
+					m.ackCount.Add(1)
+					continue
+				}
+				if msg.Priority > 0 {
+					m.recvHigh.Add(1)
 				}
 				m.recvCount.Add(1)
 				// 优先用纳秒时间戳算 E2E 延迟（亚毫秒精度）；回退到毫秒字段
@@ -526,6 +544,7 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 		defer ticker.Stop()
 
 		content := fmt.Sprintf("bench msg from %s", uid)
+		var seq int64
 
 		for {
 			select {
@@ -538,11 +557,17 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 					return
 				}
 				now := time.Now()
+				seq++
 				msg := UpMessage{
 					Type:         "danmu",
 					Content:      content,
 					ClientTS:     now.UnixMilli(),
 					ClientTSNano: now.UnixNano(),
+					MsgID:        fmt.Sprintf("%s-%d", uid, seq),
+				}
+				if priorityRatio > 0 && rand.Float64() < priorityRatio {
+					msg.Priority = 1
+					m.sentHigh.Add(1)
 				}
 				data, _ := json.Marshal(msg)
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -599,10 +624,27 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	fmt.Println("--- Throughput ---")
 	totalSend := m.sendCount.Load()
 	totalRecv := m.recvCount.Load()
+	ackCount := m.ackCount.Load()
+	sentHigh := m.sentHigh.Load()
+	recvHigh := m.recvHigh.Load()
 	elapsedSec := elapsed.Seconds()
 	fmt.Printf("  %-28s %d (%.0f/s)\n", "Total Sent:", totalSend, float64(totalSend)/elapsedSec)
 	fmt.Printf("  %-28s %d (%.0f/s)\n", "Total Received:", totalRecv, float64(totalRecv)/elapsedSec)
 	fmt.Printf("  %-28s %d\n", "Dropped:", m.dropCount.Load())
+	ackRate := 0.0
+	if totalSend > 0 {
+		ackRate = float64(ackCount) / float64(totalSend) * 100
+	}
+	fmt.Printf("  %-28s %.2f%% (%d/%d)\n", "Ack Rate:", ackRate, ackCount, totalSend)
+	fmt.Printf("  %-28s %d\n", "High-prio Sent:", sentHigh)
+	fmt.Printf("  %-28s %d\n", "High-prio Recv:", recvHigh)
+	// 单房间假设：每条高优消息应被房间内全部 conns 收到（含发送者回声）。
+	// 多房间运行时该期望值偏大，仅作量级参考。
+	highLoss := sentHigh*m.targetConns - recvHigh
+	if highLoss < 0 {
+		highLoss = 0
+	}
+	fmt.Printf("  %-28s %d (期望 %d，单房间假设)\n", "High-prio Loss:", highLoss, sentHigh*m.targetConns)
 	fmt.Println()
 
 	// 延迟层

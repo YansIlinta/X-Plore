@@ -36,6 +36,7 @@ type Hub struct {
 	tokenIssuer *TokenIssuer
 	hist        *RoomHist // 短期热历史：断线重连/进房补发最近 N 条
 	roomSeqs    sync.Map  // roomID -> *atomic.Uint64 房间内消息序号计数器
+	idem        *MsgIDSet // 房间级客户端 msg_id 幂等集合（TTL 窗口抑制重试重复广播）
 
 	msgIDCounter atomic.Uint64
 
@@ -58,6 +59,7 @@ func NewHub(serverID, mqMode string, ctx context.Context, cancel context.CancelF
 		mqMode:     mqMode,
 		filter:     NewSensitiveFilter(defaultSensitiveWords),
 		hist:       NewRoomHist(0, 0), // 默认 100 条/5min，main 里按 flag 覆盖
+		idem:       NewMsgIDSet(0),    // 默认 30s TTL，main 里按 flag 覆盖
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -160,10 +162,21 @@ func (h *Hub) removeClient(c *Client) {
 	}
 }
 
-// BroadcastToRoom 向指定房间的所有连接发送消息
+// BroadcastToRoom 向指定房间的所有连接发送普通消息（sendCh 满则静默丢弃，
+// 普通弹幕允许丢）。高优先级消息走 BroadcastToRoomHigh。
 // 使用分片 RLock，只阻塞同分片内的房间增删，不影响其他分片的广播/注册
 // 持锁约束：此处持 RLock，只做 channel send（非阻塞），不发 RPC
 func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
+	h.broadcastToRoom(roomID, data, false)
+}
+
+// BroadcastToRoomHigh 向房间所有连接发送高优先级消息：走独立的高优通道，
+// 满则计入 metricHighPriorityDrops（显式计数，不允许无声丢失）。
+func (h *Hub) BroadcastToRoomHigh(roomID string, data []byte) {
+	h.broadcastToRoom(roomID, data, true)
+}
+
+func (h *Hub) broadcastToRoom(roomID string, data []byte, high bool) {
 	shard := h.shardFor(roomID)
 	shard.mu.RLock()
 	room, ok := shard.rooms[roomID]
@@ -179,9 +192,18 @@ func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
 	shard.mu.RUnlock()
 
 	for _, c := range clients {
-		select {
-		case c.sendCh <- data:
-		default:
+		if high {
+			select {
+			case c.hpSendCh <- data:
+			default:
+				// 高优通道满：显式计数而非静默丢弃（观测/告警用）
+				metricHighPriorityDrops.Inc()
+			}
+		} else {
+			select {
+			case c.sendCh <- data:
+			default:
+			}
 		}
 	}
 }
@@ -265,9 +287,10 @@ func (h *Hub) CloseRoom(roomID string) bool {
 	delete(shard.rooms, roomID)
 	shard.mu.Unlock()
 
-	// 房间序号计数器与热历史一并清理，避免房间 churn 造成无界增长
+	// 房间序号计数器与热历史、幂等集合一并清理，避免房间 churn 造成无界增长
 	h.roomSeqs.Delete(roomID)
 	h.hist.Clear(roomID)
+	h.idem.Clear(roomID)
 
 	for _, c := range clients {
 		c.Close(4001, "room closed")

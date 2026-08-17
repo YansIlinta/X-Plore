@@ -252,6 +252,94 @@ func TestRoomListPagination(t *testing.T) {
 	}
 }
 
+// TestWSAckAndIdempotentBroadcast 客户端带 msg_id 发送：服务端回 ack；
+// TTL 窗口内重复 msg_id 只广播一次（重试仍回 ack）。
+func TestWSAckAndIdempotentBroadcast(t *testing.T) {
+	srv := testServer(t)
+	a := dialWS(t, srv, "user-a", "room-1", "danmu-secret-token")
+	defer a.Close()
+	b := dialWS(t, srv, "user-b", "room-1", "danmu-secret-token")
+	defer b.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "danmu", "msg_id": "client-abc-1", "content": "幂等测试", "client_ts": 1,
+	})
+	if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// A 收到 ack
+	gotAck := readDanmu(t, a)
+	if gotAck["type"] != "ack" || gotAck["msg_id"] != "client-abc-1" {
+		t.Fatalf("ack = %v, want {type:ack msg_id:client-abc-1}", gotAck)
+	}
+	// B 收到一次广播
+	got := readDanmu(t, b)
+	if got["content"] != "幂等测试" {
+		t.Fatalf("B received %v", got)
+	}
+
+	// A 重试同 msg_id：再回 ack，但不再广播。
+	// 注意：A 自己消息的广播回声（danmu）可能排在 ack 前，需跳过直到 ack。
+	if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	var gotAck2 map[string]any
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m := readDanmu(t, a)
+		if m["type"] == "ack" {
+			gotAck2 = m
+			break
+		}
+	}
+	if gotAck2 == nil || gotAck2["msg_id"] != "client-abc-1" {
+		t.Fatalf("dup ack = %v, want ack for client-abc-1", gotAck2)
+	}
+	// B 短窗内不应再收到该消息的广播
+	b.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	if _, data, err := b.ReadMessage(); err == nil {
+		var msgs []map[string]any
+		_ = json.Unmarshal(data, &msgs)
+		for _, m := range msgs {
+			if m["msg_id"] == "client-abc-1" {
+				t.Fatalf("duplicate broadcast delivered: %v", m)
+			}
+		}
+	}
+}
+
+// TestWSHighPriorityPassthrough 高优先级与置顶字段透传广播。
+func TestWSHighPriorityPassthrough(t *testing.T) {
+	srv := testServer(t)
+	a := dialWS(t, srv, "user-a", "room-1", "danmu-secret-token")
+	defer a.Close()
+	b := dialWS(t, srv, "user-b", "room-1", "danmu-secret-token")
+	defer b.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	pinUntil := time.Now().Add(5 * time.Second).UnixMilli()
+	payload, _ := json.Marshal(map[string]any{
+		"type": "danmu", "msg_id": "sc-1", "content": "醒目留言",
+		"priority": 1, "pin_until": pinUntil, "client_ts": 1,
+	})
+	if err := a.WriteMessage(websocket.TextMessage, payload); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	got := readDanmu(t, b)
+	if got["content"] != "醒目留言" {
+		t.Fatalf("B received %v", got)
+	}
+	if p, _ := got["priority"].(float64); p != 1 {
+		t.Fatalf("priority = %v, want 1", got["priority"])
+	}
+	if pu, _ := got["pin_until"].(float64); int64(pu) != pinUntil {
+		t.Fatalf("pin_until = %v, want %d", got["pin_until"], pinUntil)
+	}
+}
+
 // TestWSReconnectReplay 重连补发：B 带 after_seq=0 进房，应补收到此前 A 发的全部消息
 // （replay 帧带 seq 字段，帧尾 replay_done.recovered 计数）。
 func TestWSReconnectReplay(t *testing.T) {

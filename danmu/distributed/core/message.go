@@ -21,6 +21,10 @@ type Message struct {
 	// Seq 房间内单调递增序号（与单体对齐；单体的 worker flush 打号，
 	// 分布式侧重连补发未实现前恒为 0，仅保留字段做跨端 wire 兼容）。
 	Seq uint64 `json:"seq,omitempty"`
+	// Priority/PinUntil 与单体对齐的字段（0=普通，1=高优先级；置顶截止 unix 毫秒）。
+	// 分布式侧目前透传不改造通道，仅保证 wire 兼容。
+	Priority int   `json:"priority,omitempty"`
+	PinUntil int64 `json:"pin_until,omitempty"`
 }
 
 // UpMessage 上行消息（客户端 → comet）。
@@ -31,6 +35,10 @@ type UpMessage struct {
 	ClientTSNano int64  `json:"client_ts_ns,omitempty"`
 	Token        string `json:"token,omitempty"`     // type=="reauth" 时携带的新会话令牌
 	OffsetMS     int64  `json:"offset_ms,omitempty"` // 点播播放进度
+	// MsgID/Priority/PinUntil 与单体对齐（分布式侧目前不消费，仅 wire 兼容）。
+	MsgID    string `json:"msg_id,omitempty"`
+	Priority int    `json:"priority,omitempty"`
+	PinUntil int64  `json:"pin_until,omitempty"`
 }
 
 var messagePool = sync.Pool{New: func() any { return &Message{} }}

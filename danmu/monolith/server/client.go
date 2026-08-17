@@ -18,20 +18,22 @@ const (
 	pingPeriod     = 30 * time.Second
 	maxMessageSize = 4096
 	sendChSize     = 512
+	hpSendChSize   = 64 // 高优通道容量：writePump 优先排空，正常远不会满
 )
 
 // Client 代表一个 WebSocket 连接
-// writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh 串行写出
+// writePump 是 conn 的唯一写者，所有外发消息必须经 sendCh/hpSendCh 串行写出
 // 禁止其他 goroutine 直接调用 conn.WriteMessage
 type Client struct {
-	hub     *Hub
-	conn    *websocket.Conn
-	sendCh  chan []byte // 外发消息 channel，writePump 是唯一消费者
-	uid     string
-	roomID  string
-	limiter *TokenBucket
-	ctx     context.Context
-	cancel  context.CancelFunc
+	hub      *Hub
+	conn     *websocket.Conn
+	sendCh   chan []byte // 普通外发通道，writePump 是唯一消费者
+	hpSendCh chan []byte // 高优先级外发通道（醒目留言等）：writePump 优先排空
+	uid      string
+	roomID   string
+	limiter  *TokenBucket
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	closeOnce   sync.Once
 	closeCode   int
@@ -47,14 +49,15 @@ type Client struct {
 func NewClient(hub *Hub, conn *websocket.Conn, uid, roomID string, parentCtx context.Context) *Client {
 	ctx, cancel := context.WithCancel(parentCtx)
 	c := &Client{
-		hub:     hub,
-		conn:    conn,
-		sendCh:  make(chan []byte, sendChSize),
-		uid:     uid,
-		roomID:  roomID,
-		limiter: NewTokenBucket(20, 50),
-		ctx:     ctx,
-		cancel:  cancel,
+		hub:      hub,
+		conn:     conn,
+		sendCh:   make(chan []byte, sendChSize),
+		hpSendCh: make(chan []byte, hpSendChSize),
+		uid:      uid,
+		roomID:   roomID,
+		limiter:  NewTokenBucket(20, 50),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	c.sessionExpiresAt.Store(time.Now().Add(sessionTTL).UnixNano())
 	return c
@@ -129,9 +132,19 @@ func (c *Client) readPump() {
 		// 本地 AC 自动机敏感词过滤，纯内存匹配不阻塞主链路
 		content = c.hub.filter.Filter(content)
 
+		// 幂等去重：客户端携带 msg_id 时，TTL 窗口内重复的 msg_id 只广播一次
+		//（重试仍回 ack，客户端可安全重发）。
+		msgID := up.MsgID
+		if msgID == "" {
+			msgID = c.hub.nextMsgID()
+		} else if !c.hub.idem.MarkSeen(c.roomID, msgID) {
+			c.sendAck(msgID)
+			continue
+		}
+
 		msg := acquireMessage()
 		msg.Type = "danmu"
-		msg.MsgID = c.hub.nextMsgID()
+		msg.MsgID = msgID
 		msg.RoomID = c.roomID
 		msg.UID = c.uid
 		msg.Content = content
@@ -139,16 +152,33 @@ func (c *Client) readPump() {
 		msg.ClientTSNano = up.ClientTSNano
 		msg.ServerTS = time.Now().UnixMilli()
 		msg.SourceServer = c.hub.serverID
+		msg.Priority = up.Priority
+		msg.PinUntil = up.PinUntil
 
 		// 投递到进程内消息队列（带缓冲 channel 做削峰）
 		select {
 		case c.hub.msgQueue <- msg:
 			metricMessagesTotal.WithLabelValues("in").Inc()
+			// 入队即视为「已接受进入广播路径」：回 ack（不等 Kafka 落库）
+			c.sendAck(msgID)
 		default:
-			// 队列满，丢弃消息
+			// 队列满，丢弃消息（不 ack——客户端超时后可按自身策略重试）
 			releaseMessage(msg)
 			log.Printf("[readPump] msgQueue full, dropping message from uid=%s room=%s", c.uid, c.roomID)
 		}
+	}
+}
+
+// sendAck 回一条消息级 ack。走普通通道即可（ack 量级=客户端发送速率），
+// 阻塞式投递保证 ack 不丢：writePump 批量排空很快，正常不会久等。
+func (c *Client) sendAck(msgID string) {
+	ack, err := json.Marshal([]map[string]string{{"type": "ack", "msg_id": msgID}})
+	if err != nil {
+		return
+	}
+	select {
+	case c.sendCh <- ack:
+	case <-c.ctx.Done():
 	}
 }
 
@@ -235,25 +265,15 @@ func (c *Client) writePump() {
 				time.Now().Add(writeWait))
 			return
 
+		case message := <-c.hpSendCh:
+			// 高优通道优先排空
+			if err := c.writeBatched(c.hpSendCh, message); err != nil {
+				return
+			}
+
 		case message := <-c.sendCh:
-			// 批量排空：将 sendCh 中所有待发消息合并为一次 WebSocket 写入
-			pending := len(c.sendCh)
-			if pending == 0 {
-				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-					return
-				}
-			} else {
-				batched := make([][]byte, 0, pending+1)
-				batched = append(batched, message)
-				for i := 0; i < pending; i++ {
-					batched = append(batched, <-c.sendCh)
-				}
-				merged := mergeJSONArrays(batched)
-				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := c.conn.WriteMessage(websocket.TextMessage, merged); err != nil {
-					return
-				}
+			if err := c.writeBatched(c.sendCh, message); err != nil {
+				return
 			}
 
 		case <-sessionTicker.C:
@@ -270,6 +290,24 @@ func (c *Client) writePump() {
 			}
 		}
 	}
+}
+
+// writeBatched 把首条消息与通道内待发消息合并为一次 WebSocket 写入。
+func (c *Client) writeBatched(ch chan []byte, message []byte) error {
+	// 批量排空：将通道中所有待发消息合并为一次 WebSocket 写入
+	pending := len(ch)
+	if pending == 0 {
+		c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		return c.conn.WriteMessage(websocket.TextMessage, message)
+	}
+	batched := make([][]byte, 0, pending+1)
+	batched = append(batched, message)
+	for i := 0; i < pending; i++ {
+		batched = append(batched, <-ch)
+	}
+	merged := mergeJSONArrays(batched)
+	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.conn.WriteMessage(websocket.TextMessage, merged)
 }
 
 // truncateContent 把内容截断到最多 maxRunes 个 rune。字节切片（content[:n]）会切断

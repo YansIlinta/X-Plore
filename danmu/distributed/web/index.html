@@ -37,6 +37,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .input-bar button { background: #533483; color: #fff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; }
 .input-bar button:hover { background: #6a42a0; }
 .input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 醒目留言置顶栏：pin_until 未到期的消息显示在此，客户端本地计时解除 */
+.pinned-bar { background: #16213e; padding: 6px 20px; border-top: 1px solid #e94560; display: flex; flex-wrap: wrap; gap: 8px; }
+.pinned-bar:empty { display: none; }
+.pinned-item { background: #533483; color: #ffd700; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -56,6 +61,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 
 <div class="messages" id="messages"></div>
 
+<div class="pinned-bar" id="pinnedBar"></div>
+
 <div class="input-bar">
   <input id="msgInput" placeholder="输入弹幕内容..." disabled onkeydown="if(event.key==='Enter')sendMsg()" />
   <button id="sendBtn" onclick="sendMsg()" disabled>发送</button>
@@ -69,6 +76,10 @@ let sessionRefreshTimer = null;
 let sessionExpiresAt = null;
 // 已收到的最大消息序号（seq）：重连时带给服务端做缺口补发；0 = 首连拉最近 N 条
 let lastSeq = 0;
+// 自己发送待确认的消息：msg_id -> {acked, timeout}；ack 或广播回声会标记确认
+let pendingAcks = new Map();
+// 置顶中的醒目留言（pin_until 未到期），最多同时 3 条
+let pinnedMsgs = [];
 
 // 消息去重滑动窗口：Redis Pub/Sub 和 Kafka 广播消费者双路径都可能触达客户端，
 // 用 msg_id 去重，避免同一条弹幕重复渲染。定长队列保证内存不无限增长。
@@ -154,12 +165,23 @@ function connect() {
       if (msg.type === 'reauth_ack') {
         return;
       }
+      if (msg.type === 'ack') {
+        markAcked(msg.msg_id);
+        return;
+      }
       if (msg.type === 'replay_done') {
         if (msg.latest_seq) lastSeq = Math.max(lastSeq, msg.latest_seq);
         if (msg.recovered > 0) addSystemMsg(`断线补发：已恢复 ${msg.recovered} 条消息`);
         return;
       }
       if (msg.seq) lastSeq = Math.max(lastSeq, msg.seq);
+      if (msg.pin_until) maybePin(msg);
+      if (pendingAcks.has(msg.msg_id)) {
+        // 自己消息的广播回声：只确认、不重复渲染；并记入去重集防双路径重复
+        markAcked(msg.msg_id);
+        isDuplicateMsg(msg.msg_id);
+        return;
+      }
       if (isDuplicateMsg(msg.msg_id)) return;
       addDanmu(msg);
     });
@@ -195,13 +217,62 @@ function sendMsg() {
   const content = input.value.trim();
   if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
 
+  const uid = document.getElementById('uidInput').value.trim();
+  const msgId = 'c-' + uid + '-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
   const msg = {
     type: 'danmu',
+    msg_id: msgId,
     content: content,
     client_ts: Date.now()
   };
+  // 先本地渲染（未确认态），收到 ack 或广播回声后标记 ✓
+  const item = { system: false, uid, content, time: new Date().toLocaleTimeString(), self: true, acked: false, msgId };
+  pushMessage(item);
+  pendingAcks.set(msgId, item);
+  setTimeout(() => {
+    if (pendingAcks.has(msgId)) {
+      item.timeout = true;
+      renderVisible();
+    }
+  }, 3000);
   ws.send(JSON.stringify(msg));
   input.value = '';
+}
+
+function markAcked(msgId) {
+  const item = pendingAcks.get(msgId);
+  if (!item) return;
+  item.acked = true;
+  pendingAcks.delete(msgId);
+  renderVisible();
+}
+
+// 醒目留言置顶：pin_until 未到期的消息进置顶栏，客户端本地计时解除
+function maybePin(msg) {
+  const until = Number(msg.pin_until);
+  if (!until || until <= Date.now()) return;
+  if (pinnedMsgs.some(p => p.msgId === msg.msg_id)) return;
+  const entry = { msgId: msg.msg_id, uid: msg.uid, content: msg.content, until };
+  pinnedMsgs.push(entry);
+  if (pinnedMsgs.length > 3) pinnedMsgs.shift(); // 最多置顶 3 条
+  renderPinned();
+  setTimeout(() => {
+    pinnedMsgs = pinnedMsgs.filter(p => p.msgId !== msg.msg_id);
+    renderPinned();
+  }, until - Date.now());
+}
+
+function renderPinned() {
+  const bar = document.getElementById('pinnedBar');
+  bar.innerHTML = '';
+  const now = Date.now();
+  for (const p of pinnedMsgs) {
+    if (p.until <= now) continue;
+    const span = document.createElement('span');
+    span.className = 'pinned-item';
+    span.textContent = `📌 ${p.uid}: ${p.content} (${Math.ceil((p.until - now) / 1000)}s)`;
+    bar.appendChild(span);
+  }
 }
 
 // ---- 虚拟滚动消息列表 ----
@@ -272,7 +343,11 @@ function renderRow(item) {
     div.textContent = `[系统] ${item.text}`;
   } else {
     div.className = 'msg';
-    div.innerHTML = `<span class="time">${item.time}</span><span class="uid">${escHtml(item.uid || '?')}</span><span class="content">${escHtml(item.content || '')}</span>`;
+    let suffix = '';
+    if (item.self) {
+      suffix = item.acked ? ' ✓' : (item.timeout ? ' ✗未确认' : ' ⏳');
+    }
+    div.innerHTML = `<span class="time">${item.time}</span><span class="uid">${escHtml(item.uid || '?')}</span><span class="content">${escHtml(item.content || '')}${suffix}</span>`;
   }
   return div;
 }

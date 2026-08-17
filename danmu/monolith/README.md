@@ -462,6 +462,21 @@ curl http://localhost:8081/metrics
 - 验收校验：`loadtest -reconnect-check`（发送端持续发消息，接收端断开后带
   `after_seq` 重连，核对补发条数）。
 
+### 服务端 ack 与高优先级通道
+
+- **ack**：上行弹幕携带客户端生成的 `msg_id`（`{"type":"danmu","msg_id":"c-xxx",...}`），
+  服务端在消息进入广播路径（msgQueue 入队）后立即回 `{"type":"ack","msg_id":"c-xxx"}`，
+  不等 Kafka 落库。客户端可据此做发送确认；超时未 ack 可按自身策略重试。
+- **幂等**：`-idem-ttl`（默认 30s）窗口内重复 `msg_id` 只广播一次，重试仍会回 ack
+  （不产生重复弹幕）。窗口过期后同一 msg_id 可重新使用。
+- **高优先级**：上行可带 `priority:1`（醒目留言/礼物等）与 `pin_until`（置顶截止，
+  unix 毫秒，客户端本地计时解除）。worker 批量时按优先级拆两路：普通弹幕走
+  sendCh（满则**静默丢弃**，弹幕允许丢）；高优走独立通道（满则计入
+  `danmu_high_priority_drops_total` 指标，**不允许无声丢失**）。缓冲时间上普通
+  通道先于高优通道溢出，保证高优消息在普通弹幕开始丢弃时仍可送达。
+- 压测：`loadtest -priority-ratio 0.01` 按比例注入高优消息，报告输出
+  Ack Rate / High-prio Sent / Recv / Loss。
+
 ### 跨机广播（Redis 7 sharded Pub/Sub）
 
 默认启用（flag `-redis-sharded=true`，需 Redis ≥7；Dragonfly 亦实现该命令族）：

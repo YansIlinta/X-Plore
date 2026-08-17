@@ -85,19 +85,37 @@ func (wp *WorkerPool) worker(id int) {
 			for _, msg := range msgs {
 				msg.Seq = wp.hub.nextRoomSeq(roomID)
 			}
-			data, err := json.Marshal(msgs)
-			if err != nil {
-				log.Printf("[worker %d] marshal error: %v", id, err)
-				continue
+			// 按优先级拆两路：普通弹幕可丢（sendCh 满静默丢弃）；高优先级走
+			// 独立通道（满则显式计数，不无声丢失）。两路都先入热历史。
+			var normal, high []*Message
+			for _, m := range msgs {
+				if m.Priority > 0 {
+					high = append(high, m)
+				} else {
+					normal = append(normal, m)
+				}
 			}
-
 			wp.hub.hist.AppendBatch(roomID, msgs)
 
-			// 本机广播
-			wp.hub.BroadcastToRoom(roomID, data)
-
-			// Redis 跨机广播（实时路径）
-			wp.publishRedisBatch(roomID, data)
+			broadcast := func(msgs []*Message, isHigh bool) {
+				if len(msgs) == 0 {
+					return
+				}
+				data, err := json.Marshal(msgs)
+				if err != nil {
+					log.Printf("[worker %d] marshal error: %v", id, err)
+					return
+				}
+				if isHigh {
+					wp.hub.BroadcastToRoomHigh(roomID, data)
+				} else {
+					wp.hub.BroadcastToRoom(roomID, data)
+				}
+				// Redis 跨机广播（实时路径）；对端按 payload 首条 priority 路由
+				wp.publishRedisBatch(roomID, data)
+			}
+			broadcast(normal, false)
+			broadcast(high, true)
 
 			metricMessagesTotal.WithLabelValues("out").Add(float64(len(msgs)))
 			now := time.Now()

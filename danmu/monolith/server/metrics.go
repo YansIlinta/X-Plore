@@ -29,4 +29,11 @@ var (
 		Name: "danmu_msgqueue_length",
 		Help: "进程内消息队列 msgQueue 当前堆积长度",
 	})
+
+	// 高优先级消息的丢弃必须显式计数（普通弹幕允许静默丢弃，高优先级不允许
+	// 无声丢失——满则记入此计数供告警观测）
+	metricHighPriorityDrops = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "danmu_high_priority_drops_total",
+		Help: "高优先级消息因客户端高优通道满而丢弃的累计次数",
+	})
 )

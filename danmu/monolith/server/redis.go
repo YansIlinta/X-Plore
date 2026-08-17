@@ -160,8 +160,13 @@ func (rh *RedisHub) handleIncoming(channel, payload string) {
 	}
 	rh.hub.adoptRoomSeq(roomID, maxSeq)
 	rh.hub.hist.AppendBatch(roomID, msgs)
-	// payload 已经是目标广播格式（[]Message 的 JSON 数组），直接转发给客户端，无需重新 Marshal
-	rh.hub.BroadcastToRoom(roomID, []byte(payload))
+	// payload 已经是目标广播格式（[]Message 的 JSON 数组），直接转发给客户端，
+	// 无需重新 Marshal；按批次首条 priority 路由到普通/高优通道
+	if msgs[0].Priority > 0 {
+		rh.hub.BroadcastToRoomHigh(roomID, []byte(payload))
+	} else {
+		rh.hub.BroadcastToRoom(roomID, []byte(payload))
+	}
 }
 
 // extractFirstRoomID 从 payload 中扫出第一条消息的 room_id，避免完整反序列化。
