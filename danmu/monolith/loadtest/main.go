@@ -35,18 +35,39 @@ type UpMessage struct {
 	Priority     int    `json:"priority,omitempty"` // 0=普通，1=高优先级
 }
 
-type DownMessage struct {
-	Type         string `json:"type"`
-	MsgID        string `json:"msg_id,omitempty"`
-	RoomID       string `json:"room_id"`
-	UID          string `json:"uid"`
-	Content      string `json:"content"`
-	ClientTS     int64  `json:"client_ts"`
-	ClientTSNano int64  `json:"client_ts_ns"`
-	ServerTS     int64  `json:"server_ts"`
-	Priority     int    `json:"priority,omitempty"`
-	PinUntil     int64  `json:"pin_until,omitempty"`
+// scanFrame 快速扫描一帧（JSON 数组或单对象），提取压测统计量：
+//   - danmu：弹幕消息数（"type":"danmu" 出现次数）
+//   - ack  ：服务端 ack 数（"type":"ack" 出现次数）
+//   - high ：高优消息数（"priority":1 出现次数）
+//   - nanos：每条消息的 client_ts_ns 值（追加到传入切片以复用缓冲）
+//
+// 正确性前提：服务端 json 序列化字段顺序稳定（Type 在首）、内容字段被 JSON
+// 转义（用户文本里的 "type":"danmu" 不会误匹配）。字节扫描比整帧 json.Unmarshal
+// 快一个量级，是万级连接满扇出下客户端能跟上投递的关键。
+func scanFrame(data []byte, nanos []int64) (danmu, ack, high int, out []int64) {
+	danmu = bytes.Count(data, []byte(`"type":"danmu"`))
+	ack = bytes.Count(data, []byte(`"type":"ack"`))
+	high = bytes.Count(data, []byte(`"priority":1`))
+	out = nanos[:0]
+	rest := data
+	for {
+		idx := bytes.Index(rest, []byte(`"client_ts_ns":`))
+		if idx < 0 {
+			return
+		}
+		rest = rest[idx+len(`"client_ts_ns":`):]
+		var v int64
+		j := 0
+		for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+			v = v*10 + int64(rest[j]-'0')
+			j++
+		}
+		out = append(out, v)
+		rest = rest[j:]
+	}
 }
+
+// Metrics 收集压测期间的指标。
 
 // --- 指标收集 ---
 
@@ -543,6 +564,7 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
+		var nanos []int64 // 复用的纳秒时间戳缓冲
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -552,40 +574,21 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 				return
 			}
 
-			// 解析消息（可能是数组）
-			var msgs []DownMessage
-			if err := json.Unmarshal(data, &msgs); err != nil {
-				// 尝试单条
-				var single DownMessage
-				if err2 := json.Unmarshal(data, &single); err2 == nil {
-					msgs = []DownMessage{single}
-				} else {
-					continue
-				}
-			}
-
+			// 快速扫描器：只提取压测需要的统计量（danmu/ack/高优计数 + 纳秒时间戳），
+			// 避免整帧 json.Unmarshal——万级连接满扇出下 JSON 解析是接收端瓶颈。
 			nowNano := time.Now().UnixNano()
-			for _, msg := range msgs {
-				// 跳过服务端控制消息（限流提示/会话令牌/续期 ack），只统计真实弹幕
-				switch msg.Type {
-				case "rate_limited", "session_token", "reauth_ack":
-					continue
-				case "ack":
-					m.ackCount.Add(1)
-					continue
+			danmu, acks, high, nanos := scanFrame(data, nanos)
+			if acks > 0 {
+				m.ackCount.Add(int64(acks))
+			}
+			if danmu > 0 {
+				m.recvCount.Add(int64(danmu))
+				if high > 0 {
+					m.recvHigh.Add(int64(high))
 				}
-				if msg.Priority > 0 {
-					m.recvHigh.Add(1)
-				}
-				m.recvCount.Add(1)
-				// 优先用纳秒时间戳算 E2E 延迟（亚毫秒精度）；回退到毫秒字段
-				if msg.ClientTSNano > 0 {
-					if latency := nowNano - msg.ClientTSNano; latency > 0 {
+				for _, ts := range nanos {
+					if latency := nowNano - ts; latency > 0 {
 						m.RecordE2ELatency(connIdx, time.Duration(latency))
-					}
-				} else if msg.ClientTS > 0 {
-					if latency := nowNano/1e6 - msg.ClientTS; latency > 0 {
-						m.RecordE2ELatency(connIdx, time.Duration(latency)*time.Millisecond)
 					}
 				}
 			}
