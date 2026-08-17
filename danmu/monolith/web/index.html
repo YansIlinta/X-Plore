@@ -3,66 +3,172 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>弹幕系统</title>
+<title>X-Plore · 弹幕演示</title>
 <style>
+:root {
+  --bg: #0f1220;
+  --panel: #171a2e;
+  --panel2: #1e2240;
+  --border: #2a2f55;
+  --accent: #6a5ae0;
+  --accent2: #8f7bff;
+  --text: #e8e8f0;
+  --muted: #8a8fa8;
+  --ok: #37d4a0;
+  --warn: #f5a623;
+  --danger: #f25c54;
+  --gold: #ffd166;
+  --radius: 10px;
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text);
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
 
-.header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid #0f3460; }
-.header label { font-size: 13px; color: #a0a0b0; }
-.header input { background: #0f3460; border: 1px solid #533483; color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 120px; }
-.header button { background: #533483; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.header button:hover { background: #6a42a0; }
-.header button.disconnect { background: #e94560; }
+/* ---------- 顶栏 ---------- */
+.header {
+  background: linear-gradient(90deg, var(--panel), var(--panel2));
+  padding: 10px 16px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+.header .brand { font-weight: 700; font-size: 15px; letter-spacing: .5px; color: var(--accent2); margin-right: 6px; }
+.header .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+.field { display: flex; align-items: center; gap: 6px; }
+.field label { font-size: 12px; color: var(--muted); }
+.field input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 118px; outline: none;
+}
+.field input:focus { border-color: var(--accent); }
+.btn {
+  background: var(--accent); color: #fff; border: none; padding: 7px 16px; border-radius: 6px;
+  cursor: pointer; font-size: 13px; transition: filter .15s;
+}
+.btn:hover { filter: brightness(1.15); }
+.btn.danger { background: var(--danger); }
+.btn.gold { background: #b8860b; }
+.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.sm { padding: 4px 10px; font-size: 12px; border-radius: 5px; }
 
-.status-bar { background: #0f3460; padding: 8px 20px; font-size: 12px; color: #a0a0b0; display: flex; gap: 20px; }
-.status-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-.dot.connected { background: #4ecca3; }
-.dot.disconnected { background: #e94560; }
+/* ---------- 状态条 ---------- */
+.status-bar {
+  background: var(--panel); padding: 6px 16px; font-size: 12px; color: var(--muted);
+  display: flex; gap: 18px; align-items: center; border-bottom: 1px solid var(--border);
+}
+.chip { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.connected { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.dot.disconnected { background: var(--danger); }
+.dot.reconnecting { background: var(--warn); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
 
-/* 虚拟滚动：.messages 是滚动视口，#messagesSpacer 撑出与总行数等高的滚动条，
-   #messagesViewport 用 top 偏移只渲染可视区域（+上下 overscan）内的行，DOM 节点数
-   与消息总数无关，避免大量弹幕堆积时的 DOM 操作卡顿 */
-.messages { flex: 1; overflow-y: auto; padding: 0 20px; position: relative; }
+/* ---------- 高能进度条 ---------- */
+.peaks-bar {
+  background: var(--panel2); height: 26px; position: relative;
+  border-bottom: 1px solid var(--border); display: flex; align-items: center;
+}
+.peaks-bar .peak-label { position: absolute; left: 10px; top: 7px; font-size: 11px; color: var(--muted); }
+.peaks-bar .peak-mark {
+  position: absolute; top: 3px; width: 8px; height: 20px; background: linear-gradient(180deg, var(--warn), var(--danger));
+  border-radius: 2px; cursor: pointer; opacity: .85;
+}
+.peaks-bar .peak-mark:hover { opacity: 1; transform: scaleY(1.1); }
+
+/* ---------- 消息区（虚拟滚动） ---------- */
+.messages { flex: 1; overflow-y: auto; padding: 8px 16px; position: relative; }
 #messagesSpacer { position: relative; }
 #messagesViewport { position: absolute; left: 0; right: 0; }
-.msg { height: 24px; line-height: 24px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
-.msg .uid { color: #4ecca3; font-weight: 600; margin-right: 8px; }
-.msg .time { color: #666; font-size: 11px; margin-right: 8px; }
-.msg .content { color: #ddd; }
-.msg.system { color: #e94560; font-style: italic; }
+.msg {
+  height: 26px; line-height: 26px; font-size: 14px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; padding: 0 8px; border-radius: 5px;
+}
+.msg .time { color: #5b6078; font-size: 11px; margin-right: 8px; font-variant-numeric: tabular-nums; }
+.msg .uid { color: var(--ok); font-weight: 600; margin-right: 8px; }
+.msg .content { color: var(--text); }
+.msg.system { color: var(--danger); font-style: italic; font-size: 13px; }
+.msg.self { background: rgba(106, 90, 224, .12); }
+.msg.self .uid { color: var(--accent2); }
+.msg.flagged { background: rgba(245, 166, 35, .10); }
+.msg.flagged .content { color: var(--warn); }
+.msg.high { background: linear-gradient(90deg, rgba(255, 209, 102, .16), transparent); }
+.msg.high .content { color: var(--gold); font-weight: 600; }
+.msg .state { font-size: 12px; margin-left: 6px; }
+.msg .state.ok { color: var(--ok); }
+.msg .state.fail { color: var(--danger); }
+.msg .state.wait { color: var(--warn); }
 
-.input-bar { background: #16213e; padding: 12px 20px; display: flex; gap: 10px; border-top: 1px solid #0f3460; }
-.input-bar input { flex: 1; background: #0f3460; border: 1px solid #533483; color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 14px; }
-.input-bar button { background: #533483; color: #fff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; }
-.input-bar button:hover { background: #6a42a0; }
-.input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* 醒目留言置顶栏：pin_until 未到期的消息显示在此，客户端本地计时解除 */
-.pinned-bar { background: #16213e; padding: 6px 20px; border-top: 1px solid #e94560; display: flex; flex-wrap: wrap; gap: 8px; }
+/* ---------- 醒目留言置顶 ---------- */
+.pinned-bar { background: var(--panel); padding: 6px 16px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; }
 .pinned-bar:empty { display: none; }
-.pinned-item { background: #533483; color: #ffd700; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
+.pinned-item {
+  background: linear-gradient(90deg, #3a2f14, #2a2412); border: 1px solid #6b5418;
+  color: var(--gold); padding: 5px 12px; border-radius: 6px; font-size: 13px;
+  display: flex; align-items: center; gap: 8px;
+}
+.pinned-item .count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
-/* 高能进度条：峰值打点 */
-.peaks-bar { background: #0f3460; height: 28px; position: relative; border-bottom: 1px solid #16213e; margin: 0; }
-.peaks-bar .peak-mark { position: absolute; top: 2px; width: 10px; height: 24px; background: #e94560; border-radius: 2px; cursor: pointer; opacity: 0.85; }
-.peaks-bar .peak-mark:hover { opacity: 1; background: #ff6b81; }
-.peaks-bar .peak-label { position: absolute; left: 8px; top: 6px; font-size: 11px; color: #a0a0b0; }
+/* ---------- 输入栏 ---------- */
+.input-bar { background: var(--panel); padding: 10px 16px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); }
+.input-bar input#msgInput {
+  flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 10px 14px; border-radius: 8px; font-size: 14px; outline: none;
+}
+.input-bar input#msgInput:focus { border-color: var(--accent); }
+.input-bar select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 9px 8px; border-radius: 8px; font-size: 13px; outline: none;
+}
+
+/* ---------- 管理面板 ---------- */
+.admin-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 340px;
+  background: var(--panel); border-left: 1px solid var(--border);
+  transform: translateX(100%); transition: transform .25s ease; z-index: 50;
+  display: flex; flex-direction: column;
+}
+.admin-drawer.open { transform: translateX(0); }
+.admin-drawer .drawer-head {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.admin-drawer .drawer-head h3 { font-size: 15px; color: var(--accent2); }
+.admin-drawer .drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 18px; }
+.admin-drawer .section h4 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 8px; }
+.admin-drawer .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.admin-drawer input, .admin-drawer select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 8px; border-radius: 6px; font-size: 13px; outline: none; flex: 1; min-width: 0;
+}
+.admin-drawer .row .fixed { flex: 0 0 auto; }
+.word-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--panel2); margin-bottom: 6px; font-size: 13px; }
+.word-item .w-word { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.word-item .w-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+.word-item .w-badge.block { background: rgba(242, 92, 84, .2); color: var(--danger); }
+.word-item .w-badge.flag { background: rgba(245, 166, 35, .2); color: var(--warn); }
+.word-item .w-regex { color: var(--muted); font-size: 11px; }
+.form-hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <label>房间ID <input id="roomInput" value="room-1" /></label>
-  <label>用户ID <input id="uidInput" value="" /></label>
-  <label>Token <input id="tokenInput" value="danmu-secret-token" type="password" /></label>
-  <button id="connectBtn" onclick="toggleConnect()">连接</button>
+  <span class="brand">X-Plore<small>高并发直播弹幕演示</small></span>
+  <span class="field"><label>房间</label><input id="roomInput" value="room-1" /></span>
+  <span class="field"><label>用户</label><input id="uidInput" value="" /></span>
+  <span class="field"><label>Token</label><input id="tokenInput" value="danmu-secret-token" type="password" /></span>
+  <button id="connectBtn" class="btn" onclick="toggleConnect()">连接</button>
+  <button class="btn ghost" onclick="toggleAdmin()">⚙ 管理</button>
 </div>
 
 <div class="status-bar">
-  <span><span class="dot disconnected" id="statusDot"></span><span id="statusText">未连接</span></span>
-  <span>在线人数: <span id="onlineCount">-</span></span>
-  <span>房间: <span id="roomName">-</span></span>
+  <span class="chip"><span class="dot disconnected" id="statusDot"></span><span id="statusText">未连接</span></span>
+  <span class="chip">👥 在线 <span id="onlineCount">-</span></span>
+  <span class="chip">📢 房间 <span id="roomName">-</span></span>
+  <span class="chip" id="sessionChip" style="display:none">🔑 会话 <span id="sessionInfo">-</span></span>
 </div>
 
 <div class="peaks-bar" id="peaksBar"><span class="peak-label">高能进度条（需 ClickHouse 历史）</span></div>
@@ -73,12 +179,67 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 
 <div class="input-bar">
   <input id="msgInput" placeholder="输入弹幕内容..." disabled onkeydown="if(event.key==='Enter')sendMsg()" />
-  <button id="sendBtn" onclick="sendMsg()" disabled>发送</button>
+  <select id="pinDur" disabled>
+    <option value="10000">醒目 10s</option>
+    <option value="60000" selected>醒目 1min</option>
+    <option value="300000">醒目 5min</option>
+  </select>
+  <button id="pinBtn" class="btn gold" onclick="sendPin()" disabled>⭐ 醒目留言</button>
+  <button id="sendBtn" class="btn" onclick="sendMsg()" disabled>发送</button>
+</div>
+
+<!-- 管理面板 -->
+<div class="admin-drawer" id="adminDrawer">
+  <div class="drawer-head"><h3>⚙ 房间管理 · <span id="adminRoom">room-1</span></h3>
+    <button class="btn ghost sm" onclick="toggleAdmin()">✕</button></div>
+  <div class="drawer-body">
+    <div class="section">
+      <h4>敏感词库（block=打码 / flag=打标）</h4>
+      <div class="row">
+        <input id="wbWord" placeholder="词或正则（如：微\s*信）" />
+        <select id="wbMode" class="fixed" style="flex:0 0 76px">
+          <option value="block">block</option>
+          <option value="flag">flag</option>
+        </select>
+      </div>
+      <div class="row">
+        <label class="fixed" style="font-size:12px;color:var(--muted)"><input type="checkbox" id="wbRegex" style="width:auto" /> 正则</label>
+        <button class="btn sm fixed" onclick="adminAddWord()">添加</button>
+      </div>
+      <div id="wbList"></div>
+    </div>
+
+    <div class="section">
+      <h4>慢速模式（每用户发送间隔秒数，0=关闭）</h4>
+      <div class="row">
+        <input id="smSeconds" type="number" min="0" value="0" />
+        <button class="btn sm fixed" onclick="adminSetSlowMode()">应用</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h4>踢人 / 封禁</h4>
+      <div class="row">
+        <input id="kickUid" placeholder="uid" />
+        <input id="kickBan" type="number" min="0" value="60" class="fixed" style="flex:0 0 80px" title="封禁秒数，0=仅踢" />
+      </div>
+      <button class="btn sm danger fixed" onclick="adminKick()">踢出（跨机生效）</button>
+    </div>
+
+    <div class="section">
+      <h4>危险区</h4>
+      <button class="btn sm danger fixed" onclick="adminCloseRoom()">关闭房间（踢出全部）</button>
+    </div>
+
+    <div class="form-hint">管理接口均需 Bearer Token（顶栏 Token 输入框），跨机动作经 Redis 控制频道同步。</div>
+  </div>
 </div>
 
 <script>
 let ws = null;
 let connected = false;
+let userDisconnect = false;
+let reconnectAttempts = 0;
 let pollTimer = null;
 let sessionRefreshTimer = null;
 let sessionExpiresAt = null;
@@ -96,7 +257,7 @@ const seenMsgIdQueue = [];
 const MAX_SEEN_MSG_IDS = 2000;
 
 function isDuplicateMsg(msgId) {
-  if (!msgId) return false; // 没有 msg_id（如系统消息）不参与去重
+  if (!msgId) return false;
   if (seenMsgIds.has(msgId)) return true;
   seenMsgIds.add(msgId);
   seenMsgIdQueue.push(msgId);
@@ -112,6 +273,7 @@ if (!document.getElementById('uidInput').value) {
 }
 
 initVirtualList();
+initAdmin();
 
 function getWsUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -126,28 +288,41 @@ function toggleConnect() {
   if (connected) {
     disconnect();
   } else {
+    userDisconnect = false;
     connect();
   }
 }
 
+function setConnState(state, text) {
+  const dot = document.getElementById('statusDot');
+  dot.className = 'dot ' + state;
+  document.getElementById('statusText').textContent = text;
+}
+
+function setInputsEnabled(enabled) {
+  document.getElementById('msgInput').disabled = !enabled;
+  document.getElementById('sendBtn').disabled = !enabled;
+  document.getElementById('pinBtn').disabled = !enabled;
+  document.getElementById('pinDur').disabled = !enabled;
+}
+
 function connect() {
   if (ws) ws.close();
-
   const url = getWsUrl();
-  addSystemMsg('正在连接...');
+  addSystemMsg(reconnectAttempts > 0 ? `重连中 (第 ${reconnectAttempts} 次)...` : '正在连接...');
 
   ws = new WebSocket(url);
 
   ws.onopen = () => {
     connected = true;
-    document.getElementById('statusDot').className = 'dot connected';
-    document.getElementById('statusText').textContent = '已连接';
+    const wasReconnect = reconnectAttempts > 0;
+    reconnectAttempts = 0;
+    setConnState('connected', wasReconnect ? '已重连' : '已连接');
     document.getElementById('connectBtn').textContent = '断开';
-    document.getElementById('connectBtn').className = 'disconnect';
-    document.getElementById('msgInput').disabled = false;
-    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('connectBtn').className = 'btn danger';
     document.getElementById('roomName').textContent = document.getElementById('roomInput').value;
-    addSystemMsg('连接成功');
+    setInputsEnabled(true);
+    if (!wasReconnect) addSystemMsg('连接成功');
     startPolling();
     // 断线补发/进房拉最近 N 条：带上已收到的最大 seq（首连为 0）
     ws.send(JSON.stringify({ type: 'reconnect', after_seq: lastSeq }));
@@ -185,7 +360,6 @@ function connect() {
       if (msg.seq) lastSeq = Math.max(lastSeq, msg.seq);
       if (msg.pin_until) maybePin(msg);
       if (pendingAcks.has(msg.msg_id)) {
-        // 自己消息的广播回声：只确认、不重复渲染；并记入去重集防双路径重复
         markAcked(msg.msg_id);
         isDuplicateMsg(msg.msg_id);
         return;
@@ -197,15 +371,24 @@ function connect() {
 
   ws.onclose = (evt) => {
     connected = false;
-    document.getElementById('statusDot').className = 'dot disconnected';
-    document.getElementById('statusText').textContent = '已断开';
+    setConnState('disconnected', '已断开');
     document.getElementById('connectBtn').textContent = '连接';
-    document.getElementById('connectBtn').className = '';
-    document.getElementById('msgInput').disabled = true;
-    document.getElementById('sendBtn').disabled = true;
-    addSystemMsg(`连接关闭 (code=${evt.code} reason=${evt.reason || 'none'})`);
+    document.getElementById('connectBtn').className = 'btn';
+    setInputsEnabled(false);
     stopPolling();
     stopSessionRefresh();
+    if (evt.code === 4008) {
+      addSystemMsg(`会话到期断开 (4008)：请重新连接`);
+      return;
+    }
+    addSystemMsg(`连接关闭 (code=${evt.code} reason=${evt.reason || 'none'})`);
+    // 自动重连（用户主动断开除外），带退避；lastSeq 保留 → 重连后自动补发缺口
+    if (!userDisconnect) {
+      reconnectAttempts++;
+      const delay = Math.min(15000, 1000 * Math.pow(2, Math.min(reconnectAttempts - 1, 4)));
+      setConnState('reconnecting', `重连中 (${reconnectAttempts}) ${Math.round(delay / 1000)}s 后`);
+      setTimeout(() => { if (!userDisconnect && !connected) connect(); }, delay);
+    }
   };
 
   ws.onerror = () => {
@@ -214,27 +397,40 @@ function connect() {
 }
 
 function disconnect() {
+  userDisconnect = true;
   if (ws) {
     ws.close(1000, 'user disconnect');
     ws = null;
   }
+  setConnState('disconnected', '已断开');
+  addSystemMsg('已手动断开');
 }
 
 function sendMsg() {
   const input = document.getElementById('msgInput');
   const content = input.value.trim();
   if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
+  sendDanmu(content, 0, 0);
+  input.value = '';
+}
 
+// 醒目留言：高优先级 + 置顶截止
+function sendPin() {
+  const input = document.getElementById('msgInput');
+  const content = input.value.trim();
+  if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const dur = parseInt(document.getElementById('pinDur').value, 10) || 60000;
+  sendDanmu(content, 1, Date.now() + dur);
+  input.value = '';
+  addSystemMsg(`已发送醒目留言（置顶 ${Math.round(dur / 1000)}s）`);
+}
+
+function sendDanmu(content, priority, pinUntil) {
   const uid = document.getElementById('uidInput').value.trim();
   const msgId = 'c-' + uid + '-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
-  const msg = {
-    type: 'danmu',
-    msg_id: msgId,
-    content: content,
-    client_ts: Date.now()
-  };
-  // 先本地渲染（未确认态），收到 ack 或广播回声后标记 ✓
-  const item = { system: false, uid, content, time: new Date().toLocaleTimeString(), self: true, acked: false, msgId };
+  const msg = { type: 'danmu', msg_id: msgId, content, client_ts: Date.now() };
+  if (priority > 0) { msg.priority = priority; msg.pin_until = pinUntil; }
+  const item = { system: false, uid, content, time: new Date().toLocaleTimeString(), self: true, acked: false, msgId, high: priority > 0 };
   pushMessage(item);
   pendingAcks.set(msgId, item);
   setTimeout(() => {
@@ -244,7 +440,6 @@ function sendMsg() {
     }
   }, 3000);
   ws.send(JSON.stringify(msg));
-  input.value = '';
 }
 
 function markAcked(msgId) {
@@ -262,7 +457,7 @@ function maybePin(msg) {
   if (pinnedMsgs.some(p => p.msgId === msg.msg_id)) return;
   const entry = { msgId: msg.msg_id, uid: msg.uid, content: msg.content, until };
   pinnedMsgs.push(entry);
-  if (pinnedMsgs.length > 3) pinnedMsgs.shift(); // 最多置顶 3 条
+  if (pinnedMsgs.length > 3) pinnedMsgs.shift();
   renderPinned();
   setTimeout(() => {
     pinnedMsgs = pinnedMsgs.filter(p => p.msgId !== msg.msg_id);
@@ -278,18 +473,18 @@ function renderPinned() {
     if (p.until <= now) continue;
     const span = document.createElement('span');
     span.className = 'pinned-item';
-    span.textContent = `📌 ${p.uid}: ${p.content} (${Math.ceil((p.until - now) / 1000)}s)`;
+    span.innerHTML = `⭐ <b>${escHtml(p.uid)}</b> ${escHtml(p.content)} <span class="count">${Math.ceil((p.until - now) / 1000)}s</span>`;
     bar.appendChild(span);
   }
 }
 
 // ---- 虚拟滚动消息列表 ----
-const ROW_HEIGHT = 24;       // 固定行高（px），弹幕单行显示，超长省略号截断
-const OVERSCAN = 8;          // 视口上下额外渲染的行数，减少快速滚动时的空白闪烁
-const MAX_MESSAGES = 5000;   // 内存中最多保留的消息数，超出后丢弃最旧的
+const ROW_HEIGHT = 26;
+const OVERSCAN = 8;
+const MAX_MESSAGES = 5000;
 
-let messageStore = [];       // { system, text, uid, content, time }
-let autoFollow = true;       // true 时新消息到达自动滚到底部；用户手动上滚查看历史时暂停跟随
+let messageStore = [];
+let autoFollow = true;
 
 function initVirtualList() {
   const container = document.getElementById('messages');
@@ -304,18 +499,14 @@ function initVirtualList() {
 
 function pushMessage(item) {
   messageStore.push(item);
-
   let removed = 0;
   if (messageStore.length > MAX_MESSAGES) {
     removed = messageStore.length - MAX_MESSAGES;
     messageStore.splice(0, removed);
   }
-
   const container = document.getElementById('messages');
   document.getElementById('messagesSpacer').style.height = (messageStore.length * ROW_HEIGHT) + 'px';
-
   if (removed > 0 && !autoFollow) {
-    // 非跟随模式下裁掉队首不应导致当前视图跳动
     container.scrollTop -= removed * ROW_HEIGHT;
   }
   if (autoFollow) {
@@ -328,13 +519,10 @@ function renderVisible() {
   const container = document.getElementById('messages');
   const viewport = document.getElementById('messagesViewport');
   if (!viewport) return;
-
   const scrollTop = container.scrollTop;
   const viewHeight = container.clientHeight;
-
   let start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   let end = Math.min(messageStore.length, Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT) + OVERSCAN);
-
   viewport.style.top = (start * ROW_HEIGHT) + 'px';
   viewport.innerHTML = '';
   const frag = document.createDocumentFragment();
@@ -349,38 +537,49 @@ function renderRow(item) {
   if (item.system) {
     div.className = 'msg system';
     div.textContent = `[系统] ${item.text}`;
-  } else {
-    div.className = 'msg';
-    let suffix = '';
-    if (item.self) {
-      suffix = item.acked ? ' ✓' : (item.timeout ? ' ✗未确认' : ' ⏳');
-    }
-    div.innerHTML = `<span class="time">${item.time}</span><span class="uid">${escHtml(item.uid || '?')}</span><span class="content">${escHtml(item.content || '')}${suffix}</span>`;
+    return div;
   }
+  const classes = ['msg'];
+  if (item.self) classes.push('self');
+  if (item.flagged) classes.push('flagged');
+  if (item.high) classes.push('high');
+  div.className = classes.join(' ');
+  let suffix = '';
+  if (item.self) {
+    suffix = item.acked
+      ? '<span class="state ok">✓</span>'
+      : (item.timeout ? '<span class="state fail">✗未确认</span>' : '<span class="state wait">⏳</span>');
+  }
+  div.innerHTML = `<span class="time">${item.time}</span><span class="uid">${escHtml(item.uid || '?')}</span>` +
+    `<span class="content">${escHtml(item.content || '')}</span>${suffix}`;
   return div;
 }
 
 function addDanmu(msg) {
   const time = msg.server_ts ? new Date(msg.server_ts).toLocaleTimeString() : '';
-  pushMessage({ system: false, uid: msg.uid, content: msg.content, time });
+  pushMessage({
+    system: false, uid: msg.uid, content: msg.content, time,
+    flagged: msg.flag === 'spam',
+    high: msg.priority > 0,
+  });
 }
 
 function addSystemMsg(text) {
   pushMessage({ system: true, text });
 }
 
-// 会话令牌续期：服务端在握手成功后下发一个限时会话令牌（session_token），
-// 客户端需在到期前调用 /api/v1/session-token 换取新令牌，再通过 WS 发 reauth
-// 消息续期，否则服务端会在到期后主动断开长连接（见 server/client.go writePump）
+// ---- 会话令牌续期 ----
 function handleSessionToken(msg) {
   sessionExpiresAt = msg.expires_at;
+  const chip = document.getElementById('sessionChip');
+  chip.style.display = 'inline-flex';
+  document.getElementById('sessionInfo').textContent = new Date(msg.expires_at).toLocaleTimeString();
   scheduleSessionRefresh();
 }
 
 function scheduleSessionRefresh() {
   stopSessionRefresh();
   if (!sessionExpiresAt) return;
-  // 提前到期时间的一半刷新，留出重试余量
   const delay = Math.max(5000, (sessionExpiresAt - Date.now()) / 2);
   sessionRefreshTimer = setTimeout(refreshSessionToken, delay);
 }
@@ -404,19 +603,20 @@ function refreshSessionToken() {
       if (!data.token || !ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: 'reauth', token: data.token }));
       sessionExpiresAt = data.expires_at;
+      document.getElementById('sessionInfo').textContent = new Date(data.expires_at).toLocaleTimeString();
       scheduleSessionRefresh();
     })
     .catch(() => {
-      // 刷新失败先重试一次短延迟，避免因单次网络抖动导致连接到期被断开
       sessionRefreshTimer = setTimeout(refreshSessionToken, 5000);
     });
 }
 
+// ---- 轮询：房间信息 + 峰值 ----
 function startPolling() {
   stopPolling();
   pollRoomInfo();
   pollPeaks();
-  pollTimer = setInterval(() => { pollRoomInfo(); }, 3000);
+  pollTimer = setInterval(pollRoomInfo, 3000);
 }
 
 function stopPolling() {
@@ -436,7 +636,6 @@ function pollRoomInfo() {
   .catch(() => {});
 }
 
-// 高能进度条：拉取峰值点并渲染标记
 function pollPeaks() {
   const room = document.getElementById('roomInput').value.trim();
   const token = document.getElementById('tokenInput').value.trim();
@@ -450,7 +649,11 @@ function pollPeaks() {
     const peaks = data.peaks || [];
     const series = data.series || [];
     if (peaks.length === 0) {
-      bar.innerHTML += '<span class="peak-label" style="left:120px">（暂无峰值）</span>';
+      const span = document.createElement('span');
+      span.className = 'peak-label';
+      span.style.left = '120px';
+      span.textContent = '（暂无峰值）';
+      bar.appendChild(span);
       return;
     }
     const minTS = series.length ? series[0].ts : peaks[0].ts;
@@ -460,13 +663,131 @@ function pollPeaks() {
       const pct = ((p.ts - minTS) / span) * 100;
       const mark = document.createElement('div');
       mark.className = 'peak-mark';
-      mark.style.left = `calc(${pct}% - 5px)`;
+      mark.style.left = `calc(${pct}% - 4px)`;
       mark.title = `高能 @ ${new Date(p.ts * 1000).toLocaleTimeString()} count=${p.count}`;
-      mark.onclick = () => addSystemMsg(`跳到高能点 ${new Date(p.ts * 1000).toLocaleTimeString()} (count=${p.count})`);
+      mark.onclick = () => addSystemMsg(`高能点 ${new Date(p.ts * 1000).toLocaleTimeString()} (count=${p.count})`);
       bar.appendChild(mark);
     });
   })
   .catch(() => {});
+}
+
+// ---- 管理面板（P4：词库 / 慢速模式 / 踢人 / 关房）----
+function toggleAdmin() {
+  document.getElementById('adminDrawer').classList.toggle('open');
+  if (document.getElementById('adminDrawer').classList.contains('open')) {
+    document.getElementById('adminRoom').textContent = document.getElementById('roomInput').value.trim();
+    adminLoadWords();
+  }
+}
+
+function initAdmin() {
+  // 房间切换时同步管理面板
+  document.getElementById('roomInput').addEventListener('change', () => {
+    document.getElementById('adminRoom').textContent = document.getElementById('roomInput').value.trim();
+    if (document.getElementById('adminDrawer').classList.contains('open')) adminLoadWords();
+  });
+}
+
+function adminRoom() {
+  return document.getElementById('roomInput').value.trim();
+}
+function adminToken() {
+  return document.getElementById('tokenInput').value.trim();
+}
+function adminHeaders() {
+  return { 'Authorization': 'Bearer ' + adminToken(), 'Content-Type': 'application/json' };
+}
+function adminFetch(path, opts) {
+  return fetch(path, Object.assign({ headers: adminHeaders() }, opts || {}))
+    .then(r => {
+      if (r.status === 401) throw new Error('401 未授权：检查 Token');
+      if (r.status === 403) throw new Error('403 被封禁或无权');
+      if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
+      return r.status === 204 ? null : r.json();
+    });
+}
+
+function adminLoadWords() {
+  const room = adminRoom();
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(room)}/wordbank`)
+    .then(data => {
+      const list = document.getElementById('wbList');
+      list.innerHTML = '';
+      const items = (data && data.items) || [];
+      if (items.length === 0) {
+        list.innerHTML = '<div class="form-hint">（暂无词条）</div>';
+        return;
+      }
+      items.forEach(e => {
+        const row = document.createElement('div');
+        row.className = 'word-item';
+        row.innerHTML =
+          `<span class="w-word">${escHtml(e.word)}</span>` +
+          `<span class="w-badge ${e.mode}">${e.mode}</span>` +
+          (e.is_regex ? '<span class="w-regex">regex</span>' : '') +
+          `<button class="btn sm danger" onclick="adminDelWord('${escHtml(e.word).replace(/'/g, "\\'")}')">删</button>`;
+        list.appendChild(row);
+      });
+    })
+    .catch(err => addSystemMsg('词库加载失败: ' + err.message));
+}
+
+function adminAddWord() {
+  const word = document.getElementById('wbWord').value.trim();
+  const mode = document.getElementById('wbMode').value;
+  const isRegex = document.getElementById('wbRegex').checked;
+  if (!word) return;
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(adminRoom())}/wordbank`, {
+    method: 'POST',
+    body: JSON.stringify({ word, mode, is_regex: isRegex }),
+  })
+    .then(() => {
+      document.getElementById('wbWord').value = '';
+      adminLoadWords();
+      addSystemMsg(`已添加词条 ${mode}: ${word}`);
+    })
+    .catch(err => addSystemMsg('添加词条失败: ' + err.message));
+}
+
+function adminDelWord(word) {
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(adminRoom())}/wordbank?word=${encodeURIComponent(word)}`, {
+    method: 'DELETE',
+  })
+    .then(() => { adminLoadWords(); })
+    .catch(err => addSystemMsg('删除词条失败: ' + err.message));
+}
+
+function adminSetSlowMode() {
+  const seconds = parseInt(document.getElementById('smSeconds').value, 10);
+  if (isNaN(seconds) || seconds < 0) return;
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(adminRoom())}/slow-mode`, {
+    method: 'POST',
+    body: JSON.stringify({ seconds }),
+  })
+    .then(() => addSystemMsg(`慢速模式: ${seconds}s`))
+    .catch(err => addSystemMsg('设置慢速模式失败: ' + err.message));
+}
+
+function adminKick() {
+  const uid = document.getElementById('kickUid').value.trim();
+  const ban = parseInt(document.getElementById('kickBan').value, 10) || 0;
+  if (!uid) return;
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(adminRoom())}/kick`, {
+    method: 'POST',
+    body: JSON.stringify({ uid, ban_seconds: ban }),
+  })
+    .then(() => addSystemMsg(`已踢出 ${uid}（封禁 ${ban}s）`))
+    .catch(err => addSystemMsg('踢人失败: ' + err.message));
+}
+
+function adminCloseRoom() {
+  if (!confirm('确定关闭房间并踢出全部连接？')) return;
+  adminFetch(`/api/v1/admin/rooms/${encodeURIComponent(adminRoom())}/close`, {
+    method: 'POST',
+  })
+    .then(() => addSystemMsg('房间已关闭'))
+    .catch(err => addSystemMsg('关闭房间失败: ' + err.message));
 }
 
 function escHtml(s) {
