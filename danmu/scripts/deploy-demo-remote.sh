@@ -58,8 +58,8 @@ sleep 1
 
 ulimit -n 1048576 || true
 
-echo "[1/4] 启动 Redis 7"
-nohup "$DEMO_ROOT/bin/redis-server" --port 6379 --save '' --appendonly no \
+echo "[1/4] 启动 Redis 7（LANG=C 规避容器缺 locale 导致 setlocale 卡启动的问题）"
+nohup env LANG=C LC_ALL=C "$DEMO_ROOT/bin/redis-server" --port 6379 --save '' --appendonly no \
   > "$DEMO_ROOT/redis.log" 2>&1 &
 sleep 1
 "$DEMO_ROOT/bin/redis-cli" -p 6379 ping | grep -q PONG || { echo "Redis 启动失败"; exit 1; }
