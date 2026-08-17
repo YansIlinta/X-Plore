@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -170,6 +171,8 @@ func main() {
 	outputCSV := flag.String("output-csv", "", "Output CSV report to file")
 	reconnectCheck := flag.Bool("reconnect-check", false, "运行重连补发校验（单连接短场景）：校验通过/失败后退出")
 	priorityRatio := flag.Float64("priority-ratio", 0, "发送消息中高优先级(priority=1)的比例 0~1（0=全部普通）")
+	reauthEvery := flag.Duration("reauth-every", 8*time.Minute, "会话令牌续期间隔（需小于服务端 -session-ttl 默认 10min，否则长跑会被 4008 断开）")
+	noReauth := flag.Bool("no-reauth", false, "禁用会话续期（短时压测用）")
 	flag.Parse()
 
 	serverList := strings.Split(*servers, ",")
@@ -285,7 +288,7 @@ func main() {
 
 		go func(connIdx int, uid, roomID, serverURL string) {
 			defer wg.Done()
-			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime, *priorityRatio)
+			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime, *priorityRatio, *reauthEvery, *noReauth)
 		}(i, uid, roomID, serverURL)
 
 		time.Sleep(rampDelay)
@@ -448,8 +451,54 @@ func runReconnectCheck(serverURL, token string) error {
 	return fmt.Errorf("timeout waiting replay_done")
 }
 
+// reauthLoop 周期性刷新会话令牌：REST /api/v1/session-token 换新令牌 → WS 发 reauth。
+// 固定间隔（默认 8min < 服务端 -session-ttl 默认 10min），失败静默等待下一轮
+// （若连续失败，服务端到期检查每秒一次，仍可能 4008 断开——由报告中的断连暴露）。
+func reauthLoop(ctx context.Context, conn *websocket.Conn, serverURL, uid, roomID, token string, every time.Duration) {
+	// ws://host → http://host
+	httpBase := serverURL
+	if strings.HasPrefix(httpBase, "ws://") {
+		httpBase = "http://" + strings.TrimPrefix(httpBase, "ws://")
+	} else if strings.HasPrefix(httpBase, "wss://") {
+		httpBase = "https://" + strings.TrimPrefix(httpBase, "wss://")
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			body, _ := json.Marshal(map[string]string{"uid": uid, "room_id": roomID})
+			req, err := http.NewRequest(http.MethodPost, httpBase+"/api/v1/session-token", bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				continue
+			}
+			var out struct {
+				Token string `json:"token"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+			resp.Body.Close()
+			if decodeErr != nil || out.Token == "" {
+				continue
+			}
+			payload, _ := json.Marshal(map[string]string{"type": "reauth", "token": out.Token})
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			conn.WriteMessage(websocket.TextMessage, payload)
+		}
+	}
+}
+
 // runClient 单个压测连接
-func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time, priorityRatio float64) {
+func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time, priorityRatio float64, reauthEvery time.Duration, noReauth bool) {
 	// 建连
 	wsURL := fmt.Sprintf("%s/ws?uid=%s&room=%s&token=%s", serverURL, uid, roomID, token)
 
@@ -483,6 +532,12 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 		return nil
 	})
 	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+
+	// 会话续期：>10min 的压测必须续期，否则服务端 sessionTTL(10min) 到期 4008 断开。
+	// 续期流程（与 web 前端 index.html:304 一致）：REST 换新会话令牌 → WS 发 reauth。
+	if !noReauth && reauthEvery > 0 {
+		go reauthLoop(ctx, conn, serverURL, uid, roomID, token, reauthEvery)
+	}
 
 	// 读取 goroutine：收消息、统计延迟
 	readDone := make(chan struct{})

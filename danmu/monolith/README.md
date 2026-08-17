@@ -56,7 +56,6 @@ graph TB
 
     subgraph Consumers[Kafka 消费者]
         CG1[落库消费组<br/>danmu-storage]
-        CG2[广播消费组<br/>danmu-broadcast]
     end
 
     subgraph Storage

@@ -5,7 +5,8 @@
 //  4. 上行：WS 发弹幕，comet danmu_messages_total{in} 递增（readPump→uplink 生效）
 //
 // 前置：一个 etcd（默认 localhost:17379），以及用 -etcd 指到它、已启动的 logic+comet。
-// Kafka 段（logic→Kafka→job 消费）为标准 kafka-go，无 broker 时不在此验证。
+// Kafka 段（logic→Kafka→job 消费）为标准 kafka-go：加 -kafka 时执行全链路验证
+// （OnMessage→Kafka→job→PushRoom→WS），需 Kafka broker + job 运行中。
 package main
 
 import (
@@ -36,6 +37,7 @@ func main() {
 	logicRPC := flag.String("logic-rpc", "localhost:17400", "logic gRPC addr")
 	etcdEndpoints := flag.String("etcd", "localhost:17379", "etcd 客户端端点(逗号分隔)")
 	token := flag.String("token", "danmu-secret-token", "auth token")
+	kafkaChain := flag.Bool("kafka", false, "包含 Kafka 段全链路验证：logic→Kafka→job→PushRoom→WS（需 Kafka broker + job 运行中；缺 broker 时该 step 直接判失败）")
 	flag.Parse()
 
 	fails := 0
@@ -235,6 +237,68 @@ func main() {
 			time.Sleep(200 * time.Millisecond)
 		}
 	})
+
+	// Kafka 段全链路（-kafka 时执行）：logic.OnMessage→Kafka→job 消费→PushRoom→WS
+	if *kafkaChain {
+		step("Kafka 全链路：OnMessage→Kafka→job→PushRoom→WS", func() error {
+			room := "kafka-chain-room"
+			wsURL := fmt.Sprintf("ws://%s/ws?uid=kafkac&room=%s&token=%s", *cometWS, room, *token)
+			ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				return fmt.Errorf("ws dial: %w", err)
+			}
+			defer ws.Close()
+			time.Sleep(300 * time.Millisecond) // 等 AddClient 完成
+
+			recv := make(chan string, 16)
+			go func() {
+				for {
+					_, data, err := ws.ReadMessage()
+					if err != nil {
+						return
+					}
+					recv <- string(data)
+				}
+			}()
+
+			conn, err := grpc.NewClient(*logicRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			cli := pb.NewLogicServiceClient(conn)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			resp, err := cli.OnMessage(ctx, &pb.OnMessageReq{
+				RoomId: room, Uid: "kafkac", Content: "kafka-chain-verify",
+				ClientTs: time.Now().UnixMilli(), SourceComet: "chaintest",
+			})
+			if err != nil {
+				return fmt.Errorf("OnMessage: %w", err)
+			}
+			if resp.MsgId == "" {
+				return fmt.Errorf("msg_id 为空")
+			}
+
+			// job 从 Kafka 消费后按房间批量 PushRoom 到全部 comet，WS 应收到该 msg_id
+			deadline := time.After(8 * time.Second)
+			for {
+				select {
+				case msg := <-recv:
+					if strings.Contains(msg, "session_token") || strings.Contains(msg, "reauth_ack") {
+						continue
+					}
+					if !strings.Contains(msg, resp.MsgId) {
+						continue
+					}
+					fmt.Printf("    msg_id=%s 经 Kafka 全链路到达 WS\n", resp.MsgId)
+					return nil
+				case <-deadline:
+					return fmt.Errorf("8s 内未收到经 Kafka 全链路到达的消息")
+				}
+			}
+		})
+	}
 
 	fmt.Println()
 	if fails > 0 {

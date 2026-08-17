@@ -34,7 +34,7 @@ func main() {
 	chDatabase := flag.String("clickhouse-db", "default", "ClickHouse database")
 	chUsername := flag.String("clickhouse-user", "default", "ClickHouse username")
 	chPassword := flag.String("clickhouse-password", "", "ClickHouse password")
-	mode := flag.String("mode", "storage", "Consumer mode: storage|broadcast")
+	mode := flag.String("mode", "storage", "Consumer mode: storage（broadcast 已移除）")
 	flag.Parse()
 
 	brokers := strings.Split(*kafkaBrokers, ",")
@@ -54,7 +54,10 @@ func main() {
 	case "storage":
 		runStorageConsumer(ctx, brokers, *kafkaTopic, *chAddr, *chDatabase, *chUsername, *chPassword)
 	case "broadcast":
-		runBroadcastConsumer(ctx, brokers, *kafkaTopic)
+		// 2026-08 移除：该模式只是打印 stub，从未实现跨机广播。
+		// 跨机广播已由 Redis sharded Pub/Sub 承担（monolith）或 Kafka→job→
+		// PushRoom 承担（distributed）；Kafka 在弹幕链路中只做持久化落库。
+		log.Fatalf("broadcast mode 已移除：跨机广播见 Redis sharded Pub/Sub / goim PushRoom 路径")
 	default:
 		log.Fatalf("unknown mode: %s", *mode)
 	}
@@ -157,46 +160,4 @@ func runStorageConsumer(ctx context.Context, brokers []string, topic, chAddr, ch
 			flush()
 		}
 	}
-}
-
-// runBroadcastConsumer 实时广播消费组（示例：通过 Kafka 做跨机广播的备选方案）
-// 消费组 ID: danmu-broadcast
-func runBroadcastConsumer(ctx context.Context, brokers []string, topic string) {
-	log.Printf("[broadcast-consumer] starting, topic=%s", topic)
-
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        brokers,
-		Topic:          topic,
-		GroupID:        "danmu-broadcast",
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		CommitInterval: time.Second,
-		StartOffset:    kafka.LastOffset,
-	})
-	defer reader.Close()
-
-	for {
-		msg, err := reader.ReadMessage(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			log.Printf("[broadcast-consumer] read error: %v", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		var danmu Message
-		if err := json.Unmarshal(msg.Value, &danmu); err != nil {
-			log.Printf("[broadcast-consumer] unmarshal error: %v", err)
-			continue
-		}
-
-		// 实际部署中，这里会将消息推送给本机的 WebSocket 连接
-		// 本示例仅打印日志
-		log.Printf("[broadcast-consumer] room=%s uid=%s content=%s",
-			danmu.RoomID, danmu.UID, danmu.Content)
-	}
-
-	log.Println("[broadcast-consumer] stopped")
 }
