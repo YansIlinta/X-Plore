@@ -85,8 +85,93 @@ if [ -f "$DEMO_IN/danmu-loadtest" ]; then
     -conns 100 -rooms 2 -rate 1 -duration 10s -ramp 1s 2>&1 | grep -E 'Total Sent|Total Received|Dropped|Connect Failed' || true
 fi
 
+echo "[5/5] supervisord 托管（崩溃自愈 + AutoDL 开机自启）"
+SUP_BIN=""
+for c in /root/miniconda3/bin/supervisord /usr/bin/supervisord; do
+  [ -x "$c" ] && SUP_BIN="$c" && break
+done
+if [ -n "$SUP_BIN" ]; then
+  SUPCTL="$(dirname "$SUP_BIN")/supervisorctl"
+  cat > "$DEMO_ROOT/supervisord.conf" <<CONF
+[unix_http_server]
+file=$DEMO_ROOT/supervisor.sock
+
+[supervisorctl]
+serverurl=unix://$DEMO_ROOT/supervisor.sock
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[supervisord]
+logfile=$DEMO_ROOT/logs/supervisord.log
+logfile_maxbytes=10MB
+pidfile=$DEMO_ROOT/supervisord.pid
+nodaemon=false
+minfds=65535
+
+[program:redis]
+command=$DEMO_ROOT/bin/redis-server --port 6379 --save '' --appendonly no
+environment=LANG=C,LC_ALL=C
+autorestart=true
+startsecs=2
+stdout_logfile=$DEMO_ROOT/logs/redis.out.log
+stderr_logfile=$DEMO_ROOT/logs/redis.err.log
+
+[program:srvA]
+command=$DEMO_ROOT/bin/danmu-server -addr :18080 -id srvA -mq both -redis localhost:6379 -redis-sharded -pprof :16070
+directory=$DEMO_ROOT
+autorestart=true
+startsecs=2
+stdout_logfile=$DEMO_ROOT/logs/srvA.out.log
+stderr_logfile=$DEMO_ROOT/logs/srvA.err.log
+
+[program:srvB]
+command=$DEMO_ROOT/bin/danmu-server -addr :18081 -id srvB -mq both -redis localhost:6379 -redis-sharded -pprof :16071
+directory=$DEMO_ROOT
+autorestart=true
+startsecs=2
+stdout_logfile=$DEMO_ROOT/logs/srvB.out.log
+stderr_logfile=$DEMO_ROOT/logs/srvB.err.log
+CONF
+  cat > "$DEMO_ROOT/start-all.sh" <<EOF
+#!/bin/bash
+ulimit -n 1048576
+mkdir -p "$DEMO_ROOT/logs"
+if [ -f "$DEMO_ROOT/supervisord.pid" ] && kill -0 "\$(cat "$DEMO_ROOT/supervisord.pid")" 2>/dev/null; then
+  echo "supervisord already running (pid \$(cat "$DEMO_ROOT/supervisord.pid"))"; exit 0
+fi
+"$SUP_BIN" -c "$DEMO_ROOT/supervisord.conf" > /dev/null 2>&1 &
+sleep 2
+echo "supervisord started"
+EOF
+  chmod +x "$DEMO_ROOT/start-all.sh"
+  # AutoDL 开机自启（若目录存在）
+  if [ -d /root/autodl-tmp ]; then
+    cat > /root/autodl-tmp/autodl.sh <<EOF
+#!/bin/bash
+ulimit -n 1048576
+mkdir -p "$DEMO_ROOT/logs"
+"$SUP_BIN" -c "$DEMO_ROOT/supervisord.conf" > /dev/null 2>&1 &
+EOF
+    chmod +x /root/autodl-tmp/autodl.sh
+    echo "  AutoDL 开机自启已配置 (/root/autodl-tmp/autodl.sh)"
+  fi
+  # 从 nohup 裸进程切换到 supervisord
+  for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+    CMD=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+    case "$CMD" in *danmu-serve[r]*|*redis-serve[r]*) kill "$pid" 2>/dev/null;; esac
+  done
+  sleep 1
+  bash "$DEMO_ROOT/start-all.sh"
+  sleep 3
+  "$SUPCTL" -c "$DEMO_ROOT/supervisord.conf" status || true
+  echo "  托管完成：supervisord=$SUP_BIN（自愈+自启）"
+else
+  echo "  未发现 supervisord，保持 nohup 裸进程模式（无自愈/自启）"
+fi
+
 echo
 echo "部署完成。访问方式（容器只暴露 SSH 端口时）：
-  ssh -L 8080:localhost:18080 -p <ssh端口> root@<host>   # 浏览器打开 http://localhost:8080
-  （srvB: -L 8081:localhost:18081）
-日志：$DEMO_ROOT/srvA.log $DEMO_ROOT/srvB.log $DEMO_ROOT/redis.log"
+  ssh -L 8080:localhost:18080 -L 8081:localhost:18081 -p <ssh端口> root@<host>
+  # 浏览器打开 http://localhost:8080（demo） / http://localhost:8080/live.html（实时回传监控）
+日志：$DEMO_ROOT/logs/（supervisord 托管）；管理：supervisorctl -c $DEMO_ROOT/supervisord.conf status"
