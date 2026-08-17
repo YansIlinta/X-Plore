@@ -30,21 +30,25 @@
 #   或者用 srvB 隧道: -L 8081:localhost:18081
 set -euo pipefail
 
-BIN_SERVER="${1:-/root/demo-in/danmu-server-new}"
-BIN_REDIS="${2:-/root/demo-in/redis-server}"
-BIN_CLI="${3:-/root/demo-in/redis-cli}"
-PAGE="${4:-/root/demo-in/index.html}"
+# 可通过环境变量覆盖部署路径（非 root 环境测试 / 自定义目录）
+DEMO_ROOT="${DEMO_ROOT:-/root/demo}"
+DEMO_IN="${DEMO_IN:-/root/demo-in}"
+
+BIN_SERVER="${1:-$DEMO_IN/danmu-server-new}"
+BIN_REDIS="${2:-$DEMO_IN/redis-server}"
+BIN_CLI="${3:-$DEMO_IN/redis-cli}"
+PAGE="${4:-$DEMO_IN/index.html}"
 
 for f in "$BIN_SERVER" "$BIN_REDIS" "$BIN_CLI" "$PAGE"; do
   [ -f "$f" ] || { echo "缺少文件: $f"; exit 1; }
 done
 
-mkdir -p /root/demo/bin /root/demo/web
-cp -f "$BIN_SERVER" /root/demo/bin/danmu-server
-cp -f "$BIN_REDIS"  /root/demo/bin/redis-server
-cp -f "$BIN_CLI"    /root/demo/bin/redis-cli
-cp -f "$PAGE"       /root/demo/web/index.html
-chmod +x /root/demo/bin/*
+mkdir -p "$DEMO_ROOT/bin" "$DEMO_ROOT/web"
+cp -f "$BIN_SERVER" "$DEMO_ROOT/bin/danmu-server"
+cp -f "$BIN_REDIS"  "$DEMO_ROOT/bin/redis-server"
+cp -f "$BIN_CLI"    "$DEMO_ROOT/bin/redis-cli"
+cp -f "$PAGE"       "$DEMO_ROOT/web/index.html"
+chmod +x "$DEMO_ROOT"/bin/*
 
 # 清掉旧实例
 for p in $(ss -tlnp 2>/dev/null | grep -E ':18080|:18081|:6379' | grep -oP 'pid=\K[0-9]+' | sort -u); do
@@ -55,17 +59,17 @@ sleep 1
 ulimit -n 1048576 || true
 
 echo "[1/4] 启动 Redis 7"
-nohup /root/demo/bin/redis-server --port 6379 --save '' --appendonly no \
-  > /root/demo/redis.log 2>&1 &
+nohup "$DEMO_ROOT/bin/redis-server" --port 6379 --save '' --appendonly no \
+  > "$DEMO_ROOT/redis.log" 2>&1 &
 sleep 1
-/root/demo/bin/redis-cli -p 6379 ping | grep -q PONG || { echo "Redis 启动失败"; exit 1; }
+"$DEMO_ROOT/bin/redis-cli" -p 6379 ping | grep -q PONG || { echo "Redis 启动失败"; exit 1; }
 
 echo "[2/4] 启动 danmu srvA :18080 / srvB :18081（sharded Pub/Sub 跨机）"
-cd /root/demo
-nohup /root/demo/bin/danmu-server -addr :18080 -id srvA -mq both -redis localhost:6379 -redis-sharded \
-  -pprof :16070 > /root/demo/srvA.log 2>&1 &
-nohup /root/demo/bin/danmu-server -addr :18081 -id srvB -mq both -redis localhost:6379 -redis-sharded \
-  -pprof :16071 > /root/demo/srvB.log 2>&1 &
+cd "$DEMO_ROOT"
+nohup "$DEMO_ROOT/bin/danmu-server" -addr :18080 -id srvA -mq both -redis localhost:6379 -redis-sharded \
+  -pprof :16070 > "$DEMO_ROOT/srvA.log" 2>&1 &
+nohup "$DEMO_ROOT/bin/danmu-server" -addr :18081 -id srvB -mq both -redis localhost:6379 -redis-sharded \
+  -pprof :16071 > "$DEMO_ROOT/srvB.log" 2>&1 &
 sleep 2
 
 echo "[3/4] 健康检查"
@@ -75,9 +79,9 @@ done
 curl -sf http://localhost:18080/ | grep -q 'X-Plore' && echo "  UI 页面 OK" || echo "  UI 页面警告：未匹配标题"
 
 echo "[4/4] 跨机冒烟（可选，需 danmu-loadtest）"
-if [ -f /root/demo-in/danmu-loadtest ]; then
-  cp -f /root/demo-in/danmu-loadtest /root/demo/bin/ 2>/dev/null || true
-  /root/demo/bin/danmu-loadtest -server ws://localhost:18080,ws://localhost:18081 \
+if [ -f "$DEMO_IN/danmu-loadtest" ]; then
+  cp -f "$DEMO_IN/danmu-loadtest" "$DEMO_ROOT/bin/" 2>/dev/null || true
+  "$DEMO_ROOT/bin/danmu-loadtest" -server ws://localhost:18080,ws://localhost:18081 \
     -conns 100 -rooms 2 -rate 1 -duration 10s -ramp 1s 2>&1 | grep -E 'Total Sent|Total Received|Dropped|Connect Failed' || true
 fi
 
@@ -85,4 +89,4 @@ echo
 echo "部署完成。访问方式（容器只暴露 SSH 端口时）：
   ssh -L 8080:localhost:18080 -p <ssh端口> root@<host>   # 浏览器打开 http://localhost:8080
   （srvB: -L 8081:localhost:18081）
-日志：/root/demo/srvA.log /root/demo/srvB.log /root/demo/redis.log"
+日志：$DEMO_ROOT/srvA.log $DEMO_ROOT/srvB.log $DEMO_ROOT/redis.log"
