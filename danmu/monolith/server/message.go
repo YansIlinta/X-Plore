@@ -18,6 +18,7 @@ type Message struct {
 	Seq          uint64 `json:"seq,omitempty"`           // 房间内单调递增序号（worker flush 时打号），重连补发/进房拉最近 N 条的依据
 	Priority     int    `json:"priority,omitempty"`      // 0=普通弹幕（可丢），1=高优先级（醒目留言/礼物，走独立通道，不静默丢弃）
 	PinUntil     int64  `json:"pin_until,omitempty"`     // 高优先级置顶截止时间（unix 毫秒，0=不置顶）；客户端本地计时解除
+	Flag         string `json:"flag,omitempty"`          // 风控标记（如 "spam"）：房间词库 flag 模式命中的消息，放行但打标
 }
 
 // UpMessage 上行消息（客户端发往服务端）
@@ -53,6 +54,7 @@ func acquireMessage() *Message {
 	msg.Seq = 0
 	msg.Priority = 0
 	msg.PinUntil = 0
+	msg.Flag = ""
 	return msg
 }
 

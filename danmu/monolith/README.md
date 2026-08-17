@@ -476,6 +476,19 @@ curl http://localhost:8081/metrics
 - 压测：`loadtest -priority-ratio 0.01` 按比例注入高优消息，报告输出
   Ack Rate / High-prio Sent / Recv / Loss。
 
+### 风控矩阵（房间词库 / 慢速模式 / 跨机踢人）
+
+| 能力 | 接口 | 说明 |
+|------|------|------|
+| 房间词库 | `GET/POST/DELETE /api/v1/admin/rooms/{id}/wordbank` | 条目 `{word, mode:block\|flag, is_regex?}`；block 打码，flag 放行但 `flag:"spam"`；Go RE2 正则（无 ReDoS） |
+| 慢速模式 | `POST /api/v1/admin/rooms/{id}/slow-mode` `{"seconds":5}` | 房间级每用户最小发送间隔（0=关闭）；命中回 `rate_limited` |
+| 踢人/禁言 | `POST /api/v1/admin/rooms/{id}/kick` `{"uid":"u","ban_seconds":60}` | 本机踢 + Redis 控制频道跨机同步；禁言期内握手 403 |
+| 关房 | `POST /api/v1/admin/rooms/{id}/close` | 本机关房 + 跨机同步 |
+
+- 跨机控制频道：`danmu-ctrl`（与弹幕分片频道并列订阅）。
+- 词库持久化：`-wordbank-file path.json`（空=仅内存）。
+- 指标：`danmu_flagged_total`（flag 命中累计，无房间标签）。
+
 ### 跨机广播（Redis 7 sharded Pub/Sub）
 
 默认启用（flag `-redis-sharded=true`，需 Redis ≥7；Dragonfly 亦实现该命令族）：

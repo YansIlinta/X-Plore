@@ -38,8 +38,9 @@ type RedisHub struct {
 
 const (
 	defaultShardCount = 8
-	shardedChanKey    = "danmu" // 分片频道第一段（= 分片键）
-	shardedChanSuffix = ":mux"  // 固定复用频道名后缀
+	shardedChanKey    = "danmu"      // 分片频道第一段（= 分片键）
+	shardedChanSuffix = ":mux"       // 固定复用频道名后缀
+	ctrlChannel       = "danmu-ctrl" // 控制面跨机频道（踢人/关房/慢速模式）
 )
 
 func NewRedisHub(addr, password string, db int, hub *Hub, ctx context.Context, shardCount int, useSharded bool) (*RedisHub, error) {
@@ -81,13 +82,14 @@ func (rh *RedisHub) roomChannel(roomID string) string {
 // subscribeChannels 返回订阅侧需要订阅的完整频道列表。
 func (rh *RedisHub) subscribeChannels() []string {
 	if rh.useSharded {
-		channels := make([]string, rh.shardCount)
-		for i := range channels {
+		channels := make([]string, rh.shardCount+1)
+		for i := 0; i < rh.shardCount; i++ {
 			channels[i] = fmt.Sprintf("%s%d%s", shardedChanKey, i, shardedChanSuffix)
 		}
+		channels[rh.shardCount] = ctrlChannel
 		return channels
 	}
-	return []string{"room:*"}
+	return []string{"room:*", ctrlChannel}
 }
 
 // PublishBatch 将同一房间的一批消息序列化后单次发布到 Redis（sharded）Pub/Sub。
@@ -102,13 +104,14 @@ func (rh *RedisHub) PublishBatch(roomID string, data []byte) error {
 }
 
 // SubscribeLoop 订阅全部频道并处理入站消息。
-// sharded 模式订阅全部固定复用频道；经典模式用 pattern 订阅所有房间频道。
+// sharded 模式订阅全部固定复用频道 + 控制频道；经典模式用 pattern 订阅所有房间频道 + 控制频道。
 func (rh *RedisHub) SubscribeLoop() {
 	var sub *redis.PubSub
 	if rh.useSharded {
 		sub = rh.client.SSubscribe(rh.ctx, rh.subscribeChannels()...)
 	} else {
-		sub = rh.client.PSubscribe(rh.ctx, "room:*")
+		// 经典模式：PSUBSCRIBE 支持多个 pattern；ctrl 频道是精确名，pattern 也能匹配
+		sub = rh.client.PSubscribe(rh.ctx, rh.subscribeChannels()...)
 	}
 	defer sub.Close()
 
@@ -126,12 +129,36 @@ func (rh *RedisHub) SubscribeLoop() {
 	}
 }
 
-// handleIncoming 处理一条 Redis Pub/Sub 载荷（一个房间一批消息的 JSON 数组）。
-// 优化：先廉价地定位房间（经典模式从频道名；sharded 复用频道从 payload 里扫
-// 第一个 room_id，不做完整反序列化），本机不持有该房间则直接丢弃——
-// N 台机 × 全量消息里，绝大多数 payload 注定要丢弃，完整 JSON 反序列化的
-// 分配开销是横向扩展的瓶颈。
+// PublishCtrl 经控制频道广播跨机控制面动作（踢人/关房/慢速模式）。
+// sharded 模式用 SPublish（与 SSubscribe 配对），经典模式用 Publish。
+func (rh *RedisHub) PublishCtrl(msg ctrlMsg) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	if rh.useSharded {
+		return rh.client.SPublish(rh.ctx, ctrlChannel, data).Err()
+	}
+	return rh.client.Publish(rh.ctx, ctrlChannel, data).Err()
+}
+
+// handleIncoming 处理一条 Redis Pub/Sub 载荷。
+// 控制频道 → 跨机控制面；否则按房间广播处理。
 func (rh *RedisHub) handleIncoming(channel, payload string) {
+	if channel == ctrlChannel {
+		var msg ctrlMsg
+		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+			log.Printf("[RedisHub] ctrl unmarshal error: %v", err)
+			return
+		}
+		rh.hub.handleCtrl(msg)
+		return
+	}
+
+	// 优化：先廉价地定位房间（经典模式从频道名；sharded 复用频道从 payload 里扫
+	// 第一个 room_id，不做完整反序列化），本机不持有该房间则直接丢弃——
+	// N 台机 × 全量消息里，绝大多数 payload 注定要丢弃，完整 JSON 反序列化的
+	// 分配开销是横向扩展的瓶颈。
 	roomID := ""
 	if strings.HasPrefix(channel, "room:") {
 		roomID = strings.TrimPrefix(channel, "room:")

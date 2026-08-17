@@ -36,4 +36,10 @@ var (
 		Name: "danmu_high_priority_drops_total",
 		Help: "高优先级消息因客户端高优通道满而丢弃的累计次数",
 	})
+
+	// 房间词库 flag 模式命中计数（不带房间标签，避免高基数）
+	metricFlaggedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "danmu_flagged_total",
+		Help: "房间词库 flag 模式命中的消息累计数（放行但打标）",
+	})
 )

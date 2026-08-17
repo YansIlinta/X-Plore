@@ -37,6 +37,9 @@ type Hub struct {
 	hist        *RoomHist // 短期热历史：断线重连/进房补发最近 N 条
 	roomSeqs    sync.Map  // roomID -> *atomic.Uint64 房间内消息序号计数器
 	idem        *MsgIDSet // 房间级客户端 msg_id 幂等集合（TTL 窗口抑制重试重复广播）
+	wordBank    *WordBank // 房间级敏感词库（block/flag 双裁决）
+	slowMode    *SlowMode // 房间慢速模式
+	bans        *RoomBans // 房间级封禁（禁言期内握手 403）
 
 	msgIDCounter atomic.Uint64
 
@@ -60,6 +63,9 @@ func NewHub(serverID, mqMode string, ctx context.Context, cancel context.CancelF
 		filter:     NewSensitiveFilter(defaultSensitiveWords),
 		hist:       NewRoomHist(0, 0), // 默认 100 条/5min，main 里按 flag 覆盖
 		idem:       NewMsgIDSet(0),    // 默认 30s TTL，main 里按 flag 覆盖
+		wordBank:   NewWordBank(""),   // main 里按 -wordbank-file 覆盖
+		slowMode:   NewSlowMode(),
+		bans:       NewRoomBans(),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -287,10 +293,11 @@ func (h *Hub) CloseRoom(roomID string) bool {
 	delete(shard.rooms, roomID)
 	shard.mu.Unlock()
 
-	// 房间序号计数器与热历史、幂等集合一并清理，避免房间 churn 造成无界增长
+	// 房间序号计数器与热历史、幂等集合、封禁一并清理，避免房间 churn 造成无界增长
 	h.roomSeqs.Delete(roomID)
 	h.hist.Clear(roomID)
 	h.idem.Clear(roomID)
+	h.bans.Clear(roomID)
 
 	for _, c := range clients {
 		c.Close(4001, "room closed")

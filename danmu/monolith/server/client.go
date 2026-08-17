@@ -122,6 +122,16 @@ func (c *Client) readPump() {
 			continue
 		}
 
+		// 房间慢速模式（per-room 间隔，0=关闭）；命中同样回 rate_limited
+		if !c.hub.slowMode.Allow(c.roomID, c.uid) {
+			rateLimitMsg := []byte(`[{"type":"rate_limited"}]`)
+			select {
+			case c.sendCh <- rateLimitMsg:
+			default:
+			}
+			continue
+		}
+
 		if up.Type != "danmu" || up.Content == "" {
 			continue
 		}
@@ -131,6 +141,12 @@ func (c *Client) readPump() {
 		content := truncateContent(up.Content, 500)
 		// 本地 AC 自动机敏感词过滤，纯内存匹配不阻塞主链路
 		content = c.hub.filter.Filter(content)
+		// 房间词库裁决：block 打码；flag 放行但标记
+		maskedContent, flagged := c.hub.wordBank.Apply(c.roomID, content)
+		content = maskedContent
+		if flagged {
+			metricFlaggedTotal.Inc()
+		}
 
 		// 幂等去重：客户端携带 msg_id 时，TTL 窗口内重复的 msg_id 只广播一次
 		//（重试仍回 ack，客户端可安全重发）。
@@ -154,6 +170,9 @@ func (c *Client) readPump() {
 		msg.SourceServer = c.hub.serverID
 		msg.Priority = up.Priority
 		msg.PinUntil = up.PinUntil
+		if flagged {
+			msg.Flag = "spam"
+		}
 
 		// 投递到进程内消息队列（带缓冲 channel 做削峰）
 		select {

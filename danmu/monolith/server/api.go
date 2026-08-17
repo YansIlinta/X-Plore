@@ -69,6 +69,7 @@ func (a *API) SetupRoutes(mux *http.ServeMux) {
 	// 带路径参数的路由需要手动匹配
 	apiMux.HandleFunc("/api/v1/rooms/", a.handleRoomByID)
 	apiMux.HandleFunc("/api/v1/clients/", a.handleClientByID)
+	apiMux.HandleFunc("/api/v1/admin/", a.handleAdmin)
 
 	mux.Handle("/api/", authMiddleware(a.authToken, apiMux))
 
@@ -117,6 +118,12 @@ func (a *API) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// WebSocket 握手鉴权（恒定时间比较，避免计时侧信道）
 	if a.authToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.authToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// 房间封禁检查（禁言期内拒绝握手）
+	if a.hub.bans.IsBanned(roomID, uid) {
+		http.Error(w, "banned", http.StatusForbidden)
 		return
 	}
 
@@ -456,6 +463,176 @@ func parsePagination(r *http.Request) (int, int) {
 		limit = 100
 	}
 	return page, limit
+}
+
+// handleAdmin 管理面路由：
+//
+//	GET/POST/DELETE /api/v1/admin/rooms/{id}/wordbank
+//	POST            /api/v1/admin/rooms/{id}/slow-mode
+//	POST            /api/v1/admin/rooms/{id}/kick
+//	POST            /api/v1/admin/rooms/{id}/close
+func (a *API) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/")
+	// rooms/{id}/{action}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "rooms" {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "unknown admin path")
+		return
+	}
+	roomID := parts[1]
+	action := parts[2]
+	if roomID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_ROOM_ID", "room_id is required")
+		return
+	}
+
+	switch action {
+	case "wordbank":
+		a.handleAdminWordbank(w, r, roomID)
+	case "slow-mode":
+		a.handleAdminSlowMode(w, r, roomID)
+	case "kick":
+		a.handleAdminKick(w, r, roomID)
+	case "close":
+		a.handleAdminClose(w, r, roomID)
+	default:
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "unknown admin action")
+	}
+}
+
+func (a *API) handleAdminWordbank(w http.ResponseWriter, r *http.Request, roomID string) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"room_id": roomID,
+			"items":   a.hub.wordBank.RoomWords(roomID),
+		})
+	case http.MethodPost:
+		var e WordEntry
+		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+			return
+		}
+		if err := a.hub.wordBank.Set(roomID, e); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ENTRY", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	case http.MethodDelete:
+		word := r.URL.Query().Get("word")
+		if word == "" {
+			writeError(w, r, http.StatusBadRequest, "MISSING_WORD", "word query param is required")
+			return
+		}
+		a.hub.wordBank.Remove(roomID, word)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only GET/POST/DELETE allowed")
+	}
+}
+
+func (a *API) handleAdminSlowMode(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only POST allowed")
+		return
+	}
+	var req struct {
+		Seconds int `json:"seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if req.Seconds < 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SECONDS", "seconds must be >= 0")
+		return
+	}
+	a.hub.slowMode.SetInterval(roomID, time.Duration(req.Seconds)*time.Second)
+	// 跨机同步慢速模式配置
+	a.publishCtrl(ctrlMsg{Type: "slow_mode", RoomID: roomID, Seconds: req.Seconds, Origin: a.hub.serverID})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"room_id": roomID,
+		"seconds": req.Seconds,
+	})
+}
+
+func (a *API) handleAdminKick(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only POST allowed")
+		return
+	}
+	var req struct {
+		UID        string `json:"uid"`
+		BanSeconds int    `json:"ban_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UID == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "uid is required")
+		return
+	}
+	// 本机执行
+	a.applyKick(roomID, req.UID, req.BanSeconds)
+	// 跨机广播（含本机回环：origin 跳过）
+	a.publishCtrl(ctrlMsg{
+		Type: "kick", RoomID: roomID, UID: req.UID,
+		BanSeconds: req.BanSeconds, Origin: a.hub.serverID,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (a *API) handleAdminClose(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusBadRequest, "METHOD_NOT_ALLOWED", "only POST allowed")
+		return
+	}
+	a.hub.CloseRoom(roomID)
+	a.publishCtrl(ctrlMsg{Type: "close_room", RoomID: roomID, Origin: a.hub.serverID})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// applyKick 本机踢人 + 可选封禁。
+func (a *API) applyKick(roomID, uid string, banSeconds int) {
+	if banSeconds > 0 {
+		a.hub.bans.Ban(roomID, uid, time.Duration(banSeconds)*time.Second)
+	}
+	a.hub.KickClient(roomID, uid)
+}
+
+// ctrlMsg 控制面跨机消息（踢人/关房/慢速模式）。
+type ctrlMsg struct {
+	Type       string `json:"type"` // "kick" | "close_room" | "slow_mode"
+	RoomID     string `json:"room_id"`
+	UID        string `json:"uid,omitempty"`
+	BanSeconds int    `json:"ban_seconds,omitempty"`
+	Seconds    int    `json:"seconds,omitempty"` // slow_mode
+	Origin     string `json:"origin"`
+}
+
+// publishCtrl 经 Redis 控制频道广播跨机控制面动作（无 Redis 时仅本机生效）。
+func (a *API) publishCtrl(msg ctrlMsg) {
+	if a.hub.redisHub == nil {
+		return
+	}
+	if err := a.hub.redisHub.PublishCtrl(msg); err != nil {
+		log.Printf("[API] ctrl publish error: %v", err)
+	}
+}
+
+// handleCtrl 处理跨机控制面消息（由 RedisHub 在订阅循环中回调）。
+func (h *Hub) handleCtrl(msg ctrlMsg) {
+	if msg.Origin == h.serverID {
+		return // 本机已执行，跳过回环
+	}
+	switch msg.Type {
+	case "kick":
+		if msg.BanSeconds > 0 {
+			h.bans.Ban(msg.RoomID, msg.UID, time.Duration(msg.BanSeconds)*time.Second)
+		}
+		h.KickClient(msg.RoomID, msg.UID)
+	case "close_room":
+		h.CloseRoom(msg.RoomID)
+	case "slow_mode":
+		h.slowMode.SetInterval(msg.RoomID, time.Duration(msg.Seconds)*time.Second)
+	}
 }
 
 // QPS 中间件，计数每个请求

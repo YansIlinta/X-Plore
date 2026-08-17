@@ -58,23 +58,26 @@ func TestRoomChannelClassic(t *testing.T) {
 	}
 }
 
-// TestSubscribeChannels 订阅列表：sharded 为 8 个固定复用频道；经典为 room:* pattern。
+// TestSubscribeChannels 订阅列表：sharded 为 8 个固定复用频道 + 控制频道；经典为 room:* + 控制频道。
 func TestSubscribeChannels(t *testing.T) {
 	rh, _ := testRedisHub(t, "srv1", true)
 	chans := rh.subscribeChannels()
-	if len(chans) != defaultShardCount {
-		t.Fatalf("sharded subscribe channels = %d, want %d", len(chans), defaultShardCount)
+	if len(chans) != defaultShardCount+1 {
+		t.Fatalf("sharded subscribe channels = %d, want %d", len(chans), defaultShardCount+1)
 	}
-	for i, ch := range chans {
-		if shard := shardFromChannel(ch); shard != i {
-			t.Fatalf("channels[%d] = %q (shard %d), want shard %d", i, ch, shard, i)
+	for i := 0; i < defaultShardCount; i++ {
+		if shard := shardFromChannel(chans[i]); shard != i {
+			t.Fatalf("channels[%d] = %q (shard %d), want shard %d", i, chans[i], shard, i)
 		}
+	}
+	if chans[defaultShardCount] != ctrlChannel {
+		t.Fatalf("last channel = %q, want %s", chans[defaultShardCount], ctrlChannel)
 	}
 
 	rh2, _ := testRedisHub(t, "srv1", false)
 	classic := rh2.subscribeChannels()
-	if len(classic) != 1 || classic[0] != "room:*" {
-		t.Fatalf("classic subscribe channels = %v, want [room:*]", classic)
+	if len(classic) != 2 || classic[0] != "room:*" || classic[1] != ctrlChannel {
+		t.Fatalf("classic subscribe channels = %v, want [room:* %s]", classic, ctrlChannel)
 	}
 }
 
