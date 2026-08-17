@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>X-Plore · 实时回传监控</title>
+<style>
+:root {
+  --bg: #0f1220; --panel: #171a2e; --panel2: #1e2240; --border: #2a2f55;
+  --text: #e8e8f0; --muted: #8a8fa8; --ok: #37d4a0; --warn: #f5a623;
+  --danger: #f25c54; --accent: #6a5ae0; --accent2: #8f7bff;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); padding: 16px; }
+h1 { font-size: 16px; color: var(--accent2); margin-bottom: 4px; }
+.sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.card h2 { font-size: 14px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.card h2 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.card h2 .tag.ok { background: rgba(55, 212, 160, .15); color: var(--ok); }
+.card h2 .tag.bad { background: rgba(242, 92, 84, .15); color: var(--danger); }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+.metric { background: var(--panel2); border-radius: 8px; padding: 8px 10px; text-align: center; }
+.metric .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric .k { font-size: 11px; color: var(--muted); margin-top: 2px; }
+canvas { width: 100%; height: 120px; background: var(--panel2); border-radius: 8px; display: block; }
+.legend { font-size: 11px; color: var(--muted); margin-top: 6px; display: flex; gap: 14px; }
+.legend span i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<h1>X-Plore · 实时回传监控</h1>
+<div class="sub">数据经 SSH 隧道实时拉取远端 server 的 /api/v1/stats 与 /metrics（每秒刷新）· 隧道：<code>ssh -L 8080:localhost:18080 -L 8081:localhost:18081 -p &lt;端口&gt; root@&lt;主机&gt;</code></div>
+<div class="grid" id="grid"></div>
+
+<script>
+// 数据源配置：默认走 SSH 隧道端口 8080/8081；可用 ?a=端口&b=端口 覆盖（如本地直连 ?a=18080&b=18081）
+const _q = new URLSearchParams(location.search);
+const SOURCES = [
+  { port: parseInt(_q.get('a') || '8080', 10), name: 'srvA', host: 'localhost' },
+  { port: parseInt(_q.get('b') || '8081', 10), name: 'srvB', host: 'localhost' },
+];
+const TOKEN = 'danmu-secret-token';
+const HISTORY = 60; // 保留 60 秒曲线
+const state = {};
+
+function init() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  SOURCES.forEach(src => {
+    state[src.port] = { rate: [], conns: [], lastIn: null, lastTs: null };
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'card-' + src.port;
+    card.innerHTML = `
+      <h2>${src.name} <span class="tag bad" id="tag-${src.port}">连接中…</span></h2>
+      <div class="metrics">
+        <div class="metric"><div class="v" id="m-conn-${src.port}">-</div><div class="k">连接数</div></div>
+        <div class="metric"><div class="v" id="m-qps-${src.port}">-</div><div class="k">HTTP QPS</div></div>
+        <div class="metric"><div class="v" id="m-rate-${src.port}">-</div><div class="k">弹幕/s</div></div>
+        <div class="metric"><div class="v" id="m-heap-${src.port}">-</div><div class="k">堆 MB</div></div>
+      </div>
+      <canvas id="cv-${src.port}" width="600" height="120"></canvas>
+      <div class="legend"><span><i style="background:#37d4a0"></i>弹幕/s</span><span><i style="background:#6a5ae0"></i>连接数(/100)</span></div>`;
+    grid.appendChild(card);
+  });
+  setInterval(pollAll, 1000);
+  pollAll();
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.text();
+}
+
+async function pollAll() {
+  await Promise.all(SOURCES.map(src => poll(src).catch(err => {
+    const tag = document.getElementById('tag-' + src.port);
+    if (tag) { tag.className = 'tag bad'; tag.textContent = '离线: ' + err.message; }
+  })));
+}
+
+async function poll(src) {
+  const base = `http://${src.host}:${src.port}`;
+  const st = await fetchJSON(base + '/api/v1/stats');
+  const metrics = await fetchText(base + '/metrics');
+
+  // 解析弹幕计数（danmu_messages_total{direction="in"}）
+  let inTotal = 0;
+  for (const line of metrics.split('\n')) {
+    if (line.startsWith('danmu_messages_total{direction="in"} ')) {
+      inTotal = parseFloat(line.slice(line.lastIndexOf(' ') + 1));
+      break;
+    }
+  }
+  const now = Date.now();
+  const s = state[src.port];
+  let rate = 0;
+  if (s.lastIn !== null && s.lastTs !== null) {
+    const dt = (now - s.lastTs) / 1000;
+    if (dt > 0) rate = Math.max(0, Math.round((inTotal - s.lastIn) / dt));
+  }
+  s.lastIn = inTotal;
+  s.lastTs = now;
+
+  s.rate.push({ t: now, v: rate });
+  s.conns.push({ t: now, v: st.conn_count });
+  if (s.rate.length > HISTORY) s.rate.shift();
+  if (s.conns.length > HISTORY) s.conns.shift();
+
+  document.getElementById('m-conn-' + src.port).textContent = st.conn_count;
+  document.getElementById('m-qps-' + src.port).textContent = st.qps;
+  document.getElementById('m-rate-' + src.port).textContent = rate;
+  document.getElementById('m-heap-' + src.port).textContent = st.heap_mb;
+  const tag = document.getElementById('tag-' + src.port);
+  tag.className = 'tag ok';
+  tag.textContent = '在线 · ' + new Date().toLocaleTimeString() + ' · goroutines=' + st.goroutines + ' · rooms=' + st.room_count;
+  draw(src);
+}
+
+function draw(src) {
+  const cv = document.getElementById('cv-' + src.port);
+  const ctx = cv.getContext('2d');
+  const s = state[src.port];
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  if (s.rate.length < 2) return;
+  const maxRate = Math.max(10, ...s.rate.map(p => p.v));
+  const maxConn = Math.max(10, ...s.conns.map(p => p.v));
+
+  ctx.strokeStyle = '#2a2f55';
+  ctx.beginPath();
+  for (let i = 1; i < 4; i++) { ctx.moveTo(0, H * i / 4); ctx.lineTo(W, H * i / 4); }
+  ctx.stroke();
+
+  const plot = (arr, max, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    arr.forEach((p, i) => {
+      const x = (i / (HISTORY - 1)) * W;
+      const y = H - (p.v / max) * H * 0.9 - 4;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  };
+  plot(s.rate, maxRate, '#37d4a0');
+  plot(s.conns, maxConn * 100, '#6a5ae0');
+}
+
+init();
+</script>
+</body>
+</html>
