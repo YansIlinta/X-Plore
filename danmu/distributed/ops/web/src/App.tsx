@@ -7,18 +7,23 @@ import Traffic from "./pages/Traffic";
 import Rooms from "./pages/Rooms";
 import KafkaPage from "./pages/Kafka";
 import Messages from "./pages/Messages";
-import LoadTest from "./pages/LoadTest";
+import Experiments from "./pages/Experiments";
+import Compare from "./pages/Compare";
+import Evidence from "./pages/Evidence";
 import EventsPage from "./pages/Events";
 
 // 轻量 hash 路由：页面少，不引入 react-router。
+// 信息结构按产品建议：观测之上的实验层（Experiments / Compare / Evidence）放在最前。
 const PAGES: { path: string; label: string; indent?: boolean }[] = [
   { path: "overview", label: "Overview" },
+  { path: "experiments", label: "Experiments" },
+  { path: "compare", label: "Compare" },
+  { path: "evidence", label: "Evidence" },
   { path: "topology", label: "Topology" },
   { path: "traffic", label: "Traffic" },
   { path: "rooms", label: "Rooms" },
   { path: "kafka", label: "Kafka" },
   { path: "messages", label: "Messages" },
-  { path: "loadtest", label: "Load Test" },
   { path: "events", label: "Events" },
   { path: "services", label: "Services" },
   { path: "services/comet", label: "Comet", indent: true },
@@ -54,16 +59,19 @@ export default function App() {
   const healthClass = data ? health : "unknown";
 
   let page: React.ReactNode;
-  if (route === "overview") page = <Overview />;
-  else if (route === "topology") page = <Topology />;
-  else if (route === "traffic") page = <Traffic />;
-  else if (route === "rooms") page = <Rooms />;
-  else if (route === "kafka") page = <KafkaPage />;
-  else if (route === "messages") page = <Messages />;
-  else if (route === "loadtest") page = <LoadTest />;
-  else if (route === "events") page = <EventsPage />;
-  else if (route === "services") page = <Services />;
-  else if (route.startsWith("services/")) page = <Services component={route.split("/")[1]} />;
+  const effectiveRoute = route === "loadtest" ? "experiments" : route; // 旧 Load Test 入口 → Experiments
+  if (effectiveRoute === "overview") page = <Overview />;
+  else if (effectiveRoute === "experiments") page = <Experiments />;
+  else if (effectiveRoute === "compare") page = <Compare />;
+  else if (effectiveRoute === "evidence") page = <Evidence />;
+  else if (effectiveRoute === "topology") page = <Topology />;
+  else if (effectiveRoute === "traffic") page = <Traffic />;
+  else if (effectiveRoute === "rooms") page = <Rooms />;
+  else if (effectiveRoute === "kafka") page = <KafkaPage />;
+  else if (effectiveRoute === "messages") page = <Messages />;
+  else if (effectiveRoute === "events") page = <EventsPage />;
+  else if (effectiveRoute === "services") page = <Services />;
+  else if (effectiveRoute.startsWith("services/")) page = <Services component={effectiveRoute.split("/")[1]} />;
   else page = <div className="hint">404: {route}</div>;
 
   return (
@@ -76,14 +84,14 @@ export default function App() {
         <nav>
           {PAGES.map((p) =>
             p.indent ? null : (
-              <a key={p.path} href={`#/${p.path}`} className={route === p.path ? "active" : ""}>
+              <a key={p.path} href={`#/${p.path}`} className={effectiveRoute === p.path ? "active" : ""}>
                 {p.label}
               </a>
             )
           )}
           <div className="nav-group">Services</div>
           {PAGES.filter((p) => p.indent).map((p) => (
-            <a key={p.path} href={`#/${p.path}`} className={`indent ${route === p.path ? "active" : ""}`}>
+            <a key={p.path} href={`#/${p.path}`} className={`indent ${effectiveRoute === p.path ? "active" : ""}`}>
               {p.label}
             </a>
           ))}
@@ -92,7 +100,7 @@ export default function App() {
       <div className="main">
         {data?.mock && <div className="mock-banner">MOCK DATA — 演示模式，数值不代表真实系统</div>}
         <header className="topbar">
-          <PageTitle route={route} />
+          <PageTitle route={effectiveRoute} />
           <span className={`health-badge ${healthClass}`}>
             System {data ? health : "connecting…"}
           </span>

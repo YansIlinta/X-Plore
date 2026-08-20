@@ -132,6 +132,160 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await resp.json()) as T;
 }
 
+// ---- Realtime Systems Lab：实验 / 对比 / 证据 ----
+
+export type ExpStatus = "created" | "running" | "completed" | "failed" | "stopped";
+export type Architecture = "monolith" | "distributed";
+
+export interface Workload {
+  connections: number;
+  rooms: number;
+  message_rate: number;
+  duration: string;
+  target: string;
+}
+
+export interface EnvironmentSnapshot {
+  git_commit: string | null;
+  git_dirty: boolean | null;
+  go_version: string;
+  os: string;
+  arch: string;
+  cpu_cores: number;
+  memory_bytes: number | null;
+  hostname: string | null;
+}
+
+export interface DistributedSnapshot {
+  comet_total: number;
+  comet_healthy: number;
+  logic_total: number;
+  job_total: number;
+  etcd_up: boolean;
+  health: string;
+  free_text?: string;
+}
+
+export interface ExperimentResult {
+  connections_requested: number | null;
+  connections_established: number | null;
+  connections_failed: number | null;
+  messages_sent: number | null;
+  messages_received: number | null;
+  write_errors: number | null;
+  read_errors: number | null;
+  drops: number | null;
+  p50_latency_us: number | null;
+  p90_latency_us: number | null;
+  p99_latency_us: number | null;
+  max_latency_us: number | null;
+  send_rate: number | null;
+  receive_rate: number | null;
+  kafka_available: boolean | null;
+  kafka_lag: number | null;
+  etcd_up: boolean | null;
+  trace_samples: number | null;
+  trace_completion_rate: number | null;
+  service_snapshot: DistributedSnapshot | null;
+  representative_traces?: unknown[];
+  notes?: string[];
+}
+
+export interface Experiment {
+  id: string;
+  name: string;
+  architecture: Architecture;
+  preset: string;
+  status: ExpStatus;
+  workload: Workload;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  environment: EnvironmentSnapshot | null;
+  result: ExperimentResult;
+  error?: string;
+}
+
+export interface ExperimentLive {
+  running: boolean;
+  params?: Record<string, unknown>;
+  started_at?: string;
+  elapsed_s?: number | null;
+  latest?: Record<string, number> | null;
+}
+
+export interface ExperimentDetailResp {
+  experiment: Experiment;
+  live?: ExperimentLive;
+}
+export interface ExperimentListResp {
+  experiments: Experiment[];
+  active_id: string | null;
+}
+export interface ExperimentReportResp {
+  experiment: Experiment;
+  claims: Claim[];
+}
+
+export interface Preset {
+  name: string;
+  label: string;
+  description: string;
+  question: string;
+  architecture: Architecture;
+  workload: Workload;
+}
+export interface PresetsResp {
+  presets: Preset[];
+}
+
+export type ClaimStatus = "VERIFIED" | "PARTIALLY VERIFIED" | "CODE VERIFIED" | "TARGET" | "UNKNOWN";
+export interface Claim {
+  id: string;
+  claim: string;
+  status: ClaimStatus;
+  evidence: string[];
+  experiment_id: string | null;
+  environment?: EnvironmentSnapshot | null;
+  commit: string | null;
+  date: string | null;
+  notes: string;
+}
+export interface EvidenceResp {
+  claims: Claim[];
+  statuses: ClaimStatus[];
+}
+
+export interface CompareRow {
+  metric: string;
+  label: string;
+  unit: string;
+  group: string;
+  direction: string;
+  left: number | null;
+  right: number | null;
+  delta: number | null;
+  delta_pct: number | null;
+  verdict: string;
+}
+export interface CompareRef {
+  id: string;
+  name: string;
+  architecture: string;
+  preset: string;
+  status: string;
+  workload: Workload;
+  started_at: string | null;
+  finished_at: string | null;
+}
+export interface CompareResp {
+  left: CompareRef;
+  right: CompareRef;
+  rows: CompareRow[];
+  summary: string[];
+  net: string;
+}
+
 export const api = {
   overview: () => getJSON<Overview>("/api/overview"),
   services: () => getJSON<ServicesResp>("/api/services"),
@@ -140,6 +294,36 @@ export const api = {
   rooms: () => getJSON<RoomsResp>("/api/rooms"),
   roomDetail: (id: string) => getJSON<RoomDetailResp>(`/api/rooms/${encodeURIComponent(id)}`),
   traces: (limit = 50) => getJSON<TracesResp>(`/api/traces?limit=${limit}`),
+  presets: () => getJSON<PresetsResp>("/api/presets"),
+  experiments: (limit = 100) => getJSON<ExperimentListResp>(`/api/experiments?limit=${limit}`),
+  createExperiment: (body: {
+    name?: string;
+    architecture: Architecture;
+    preset: string;
+    workload: Workload;
+  }) =>
+    fetch("/api/experiments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      const j = (await r.json()) as { experiment?: Experiment; error?: string };
+      if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+      return j.experiment!;
+    }),
+  experimentDetail: (id: string) => getJSON<ExperimentDetailResp>(`/api/experiments/${encodeURIComponent(id)}`),
+  experimentReport: (id: string) => getJSON<ExperimentReportResp>(`/api/experiments/${encodeURIComponent(id)}/report`),
+  experimentStart: (id: string) =>
+    fetch(`/api/experiments/${encodeURIComponent(id)}/start`, { method: "POST" }).then(async (r) => {
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? `HTTP ${r.status}`);
+    }),
+  experimentStop: (id: string) =>
+    fetch(`/api/experiments/${encodeURIComponent(id)}/stop`, { method: "POST" }).then(async (r) => {
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? `HTTP ${r.status}`);
+    }),
+  compare: (left: string, right: string) =>
+    getJSON<CompareResp>(`/api/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`),
+  evidence: () => getJSON<EvidenceResp>("/api/evidence"),
   loadtestStatus: () => getJSON<LoadtestStatus>("/api/loadtest/status"),
   loadtestStart: (params: Record<string, unknown>) =>
     fetch("/api/loadtest/start", {

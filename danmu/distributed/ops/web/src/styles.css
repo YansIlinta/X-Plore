@@ -264,3 +264,83 @@ button.btn.danger:hover:not(:disabled) { background: #2a1415; }
 @keyframes dashflow { to { stroke-dashoffset: -10; } }
 
 .section-gap { height: 4px; }
+
+/* ---- Realtime Systems Lab（实验 / 对比 / 证据） ---- */
+.field-label {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.field-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+.field-input:disabled { opacity: 0.5; }
+select.field-input { font-family: var(--mono); }
+
+.preset-row { align-items: center; }
+.preset-btn {
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 7px 13px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.preset-btn:hover:not(:disabled) { border-color: var(--text-dim); }
+.preset-btn.active { color: var(--text); border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan) inset; }
+.preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.comp-table { width: 100%; border-collapse: collapse; }
+.comp-table th, .comp-table td {
+  text-align: left;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  vertical-align: top;
+}
+.comp-table th {
+  color: var(--text-faint);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+}
+.comp-table tbody tr:hover { background: var(--bg-panel-2); }
+.comp-table .row-selected { background: #1b2430 !important; }
+
+.mono-cell { font-family: var(--mono); }
+.mono-dim { color: var(--text-faint); font-family: var(--mono); font-size: 11.5px; }
+.na-cell { color: var(--text-faint); font-family: var(--mono); }
+
+.panel-sub {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+.summary-line { padding: 3px 0; color: var(--text); }
+.summary-net { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--cyan); font-weight: 600; }
+
+.env-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 18px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.git-dirty { color: var(--amber); }
+
+.evid-list { margin: 0; padding-left: 16px; color: var(--text-dim); font-size: 11.5px; }
+.evid-list li { margin: 1px 0; }
+
+button.btn.small { padding: 3px 9px; font-size: 11px; }
