@@ -68,7 +68,12 @@ cd danmu/monolith && go test -race ./server/
 | 分布式：etcd 发现 + Logic.OnMessage + PushRoom→WS + trace | ✅ 实测（chaintest） |
 | Ops Console 聚合与健康判定 | ✅ 实测 |
 | standalone comet 压测（P50 ~0.4ms @ 200 连接） | ✅ 实测 |
+| **Realtime Systems Lab（实验/对比/证据）** | ✅ 实测（200c/100r 与 400c/10r 各一次，见 [EXPERIMENTS.md §9](./danmu/distributed/EXPERIMENTS.md)） |
 | Kafka 段（logic→Kafka→job 扇出）、Redis 跨机广播、ClickHouse 落库/历史 | ⏳ 需中间件环境（compose / run-goim-local.sh） |
+
+> 说明：©上面 "✅ 实测" 是不同日期、不同机器上的记录；每一行都非「当前版本自动证明」。
+> Realtime Systems Lab 的 Evidence 页只认实验存储、不认文档——想证明一个性能数字，
+> 必须在当前版本上跑一次实验让引擎判定（VERIFIED / PARTIALLY VERIFIED / TARGET）。
 
 ## 文档地图
 
@@ -78,3 +83,5 @@ cd danmu/monolith && go test -race ./server/
 | [danmu/monolith/README.md](./danmu/monolith/README.md) | 单体版部署、压测剧本、系统调优清单、接口文档 |
 | [danmu/monolith/REVIEW.md](./danmu/monolith/REVIEW.md) | 单体版代码审查报告（H/M/L 逐条问题与修复） |
 | [danmu/distributed/DESIGN.md](./danmu/distributed/DESIGN.md) | goim 式微服务化设计：Comet/Logic/Job 分层与 etcd |
+| [danmu/distributed/EXPERIMENTS.md](./danmu/distributed/EXPERIMENTS.md) | Realtime Systems Lab：实验模型 / API / 复现命令 / 实测记录 |
+| [danmu/distributed/EVIDENCE.md](./danmu/distributed/EVIDENCE.md) | Evidence/Claims 语义：VERIFIED / PARTIAL / CODE / TARGET / UNKNOWN |

@@ -76,10 +76,28 @@ GET  /api/events               系统事件流（实例出现/消失/恢复、�
 GET  /api/traces               msg_id 汇聚链路（sources 附带各节点采样状态/丢弃计数）
 GET  /api/rooms                跨 comet 房间聚合（按需查询，limit≤100/实例）
 GET  /api/rooms/{id}           单房间定位（在哪些 comet、在线数）
-GET  /api/loadtest/status      压测状态/最近快照/结束报告
+
+# Realtime Systems Lab（实验 / 对比 / 证据，见 EXPERIMENTS.md / EVIDENCE.md）
+GET  /api/presets              preset 模板（含默认 workload 与想回答的问题）
+GET  /api/experiments          历史实验（有界）
+POST /api/experiments          create（400 校验失败 / 422 未知 preset）
+GET  /api/experiments/{id}     详情（running 时带 live 实时快照）
+POST /api/experiments/{id}/start  ACTION：启动（409 已在跑 / 404 不存在）
+POST /api/experiments/{id}/stop   ACTION：停止（409 未在跑）
+GET  /api/experiments/{id}/report  完整报告 + 复现元数据 + 关联 claims
+GET  /api/compare?left=&right=  对比（两侧必须 completed，否则 422）
+GET  /api/evidence              claims 当前状态（VERIFIED 仅来自实验存储）
+
+# 兼容入口：旧 Load Test 页已并入 Experiments 页；下面三个端点保留，委托同一状态机
+GET  /api/loadtest/status      压测状态/最近快照/结束报告（附 active_experiment）
 POST /api/loadtest/start       ACTION：启动压测（409 已运行 / 503 二进制缺失）
 POST /api/loadtest/stop        ACTION：终止压测
 ```
+
+状态机唯一主人是 **ExperimentManager**（`ops/experiment_manager.go`）：全局同时
+只能有一个实验/压测在跑（loadtest 子进程单例），旧的 `/api/loadtest/*` 只是它
+的兼容入口，绝不维护两套压测状态机。（*本次修改前 Load Test 页报告"无 e2e 延迟"
+等行为已并入 Experiments 页，见 EXPERIMENTS.md 已知限制。）
 
 数据真实性约定：拿不到的数据一律 `null`（前端渲染 N/A），不伪造 0；`-mock` 显式开启后
 所有响应带 `"mock":true`，前端显示 **MOCK DATA** 横幅。
@@ -107,10 +125,14 @@ npm run dev      # Vite 开发服务器（API 代理到 :7900）
 npm run build    # 产物到 ops/web/dist，由 ops 的 go:embed 内嵌
 ```
 
-- 路由：hash 路由（无 react-router 依赖），9 个页面：Overview / Topology / Services /
-  Traffic / Rooms / Kafka / Messages / Load Test / Events。
+- 路由：hash 路由（无 react-router 依赖），页面：Overview / **Experiments(实验) /
+  Compare(对比) / Evidence(证据)** / Topology / Traffic / Rooms / Kafka / Messages /
+  Events / Services。旧 Load Test 页并入 Experiments（`#/loadtest` 仍可直达，跳转
+  到 Experiments）。
 - 图表：uPlot（轻量 canvas），拓扑自绘 SVG，节点按健康上色、连线按实时速率做流动动画。
 - 前端只消费 §4 的 API，不直接访问任何业务服务，不把分布式逻辑塞进浏览器。
+- 实验数据目录：`ops -data-dir=...`（默认 `./data`，子目录 `experiments/` 存 JSON）；
+  git 复现元数据：`ops -repo-dir=<仓库路径>`（空 = 不含 git 字段，见 EXPERIMENTS.md）。
 
 ## 7. 已知限制与已验证场景
 
@@ -142,5 +164,6 @@ npm run build    # 产物到 ops/web/dist，由 ops 的 go:embed 内嵌
 - 观测代码必须 O(1)/聚合/有界：禁止为 Dashboard 遍历全部连接；实时消息、事件、trace
   全部是带上限的环形缓冲。
 - ops 不依赖任何业务服务才能启动；etcd 掉线用上次清单继续探测并在事件流里报警。
-- 测试：`go test ./...`（ops 含 rate 量级、分组去重、loadtest 解析等回归）；前端
-  `npm run build` + typecheck。改动后两者都要跑。
+- 测试：`go test ./...`（ops 含 rate 量级、分组去重、loadtest 解析、**实验状态机/
+  持久化恢复/损坏容忍/对比/证据**等回归）；前端 `npm run build` + typecheck。
+  改动后两者都要跑。

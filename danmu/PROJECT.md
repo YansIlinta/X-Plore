@@ -274,7 +274,10 @@ curl http://localhost:8081/metrics
 | **PROJECT.md（本文）** | 统合总览：架构、取舍、启动、边界 |
 | `danmu/monolith/README.md` | 单体详解、压测剧本、内核调优、排障 |
 | `danmu/distributed/DESIGN.md` | 微服务拆分契约与数据流、验证状态 |
+| **`danmu/distributed/EXPERIMENTS.md`** | Realtime Systems Lab：实验/对比/证据层、复现命令、实测记录 |
+| **`danmu/distributed/EVIDENCE.md`** | VERIFIED / PARTIAL / CODE VERIFIED / TARGET / UNKNOWN 语义与验证算法 |
 | `danmu/monolith/REVIEW.md` | 问题清单、修复、压测前后对比 |
+| `danmu/distributed/OPS.md` | Ops Console 使用（含实验层 API） |
 
 ---
 
