@@ -2,50 +2,52 @@ package core
 
 import (
 	"context"
-	"sync"
+	"strconv"
 	"sync/atomic"
 )
 
-const numShards = 256
-
-type roomShard struct {
-	mu    sync.RWMutex
-	rooms map[string]map[string]*Client
-}
-
-// Hub 管理本机所有房间-连接映射，按 roomID 哈希分 256 片，各片独立 RWMutex。
+// Hub 是本机连接平面的门面（comet 注入点）：把 room-centric 的分片房表升级为
+// 通用 Connection Kernel（见 connkernel.go），对外保留旧 room API 作为兼容层。
 //
-// 相对原单体的改动（REVIEW round-2 D1）：去掉 register/unregister channel 和单个
-// Run goroutine——AddClient/RemoveClient 本就持分片锁、并发安全，没必要再用一个
-// 全局 goroutine 串行化，那是万级并发建连时延迟尖刺的根因。
+// 兼容映射：room 是 channel 的特例，内部一律以
+//
+//	danmu:room:<roomID>
+//
+// 作为 SubscriptionIndex 的 channel key；BroadcastToRoom/CloseRoom/KickClient 等
+// 旧语义不变地委托到 kernel，因此 comet（PushRoom/localBroadcast）与既有的
+// Danmu 行为无需改动、不回归。
+//
+// 身份：每个 Client 由 Hub.AddClient 分配稳定 ConnectionID，并补充
+// DeviceID（客户端未上报则回落 DefaultDeviceID）与 GatewayID（=本机 ServerID）。
+// 顶级行为从「uid → 单连接（顶号）」升级为「user / device / connection」多设备并存，
+// 由 ConnectionPolicy 显式选择：
+//
+//	PolicyMultiDevice         默认：同一用户可多设备/多连接并存（US-01）
+//	PolicySingleDevicePerUser 显式顶号：新连接顶掉该用户全部旧连接
 type Hub struct {
-	shards   [numShards]*roomShard
 	ServerID string
-
-	// connCount/roomCount 原子计数：与分片 map 同步维护，供观测接口 O(1) 读取，
-	// 免掉 GetConnCount/GetRoomCount 的 256 分片扫描。
-	connCount atomic.Int64
-	roomCount atomic.Int64
-
 	// TokenIssuer 用于校验 reauth 令牌（会话续期）。
 	TokenIssuer *TokenIssuer
 	// Uplink 由 comet 注入：readPump 收到一条弹幕就回调它（转发给 Logic）。
-	// offsetMS 为点播进度（毫秒），直播可传 0。
 	Uplink func(uid, roomID, content string, clientTS, clientTSNano, offsetMS int64)
+
+	// ConnectionPolicy 决定同一用户的连接并存语义（默认 PolicyMultiDevice）。
+	ConnectionPolicy SessionPolicy
+
+	connSeq  atomic.Uint64
+	connMan  *ConnectionManager
+	sessions *SessionIndex
+	subs     *SubscriptionIndex
 
 	ctx context.Context
 }
 
-func NewHub(serverID string, ctx context.Context) *Hub {
-	h := &Hub{ServerID: serverID, ctx: ctx}
-	for i := range h.shards {
-		h.shards[i] = &roomShard{rooms: make(map[string]map[string]*Client)}
-	}
-	return h
-}
-
+// fnv32 FNV-1a 哈希，用于 key 到分片的映射（内核与 RoomInfo 共用）。
 func fnv32(s string) uint32 {
-	const offset32, prime32 = 2166136261, 16777619
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
 	h := uint32(offset32)
 	for i := 0; i < len(s); i++ {
 		h ^= uint32(s[i])
@@ -54,91 +56,83 @@ func fnv32(s string) uint32 {
 	return h
 }
 
-func (h *Hub) shardFor(roomID string) *roomShard {
-	return h.shards[fnv32(roomID)%numShards]
+func NewHub(serverID string, ctx context.Context) *Hub {
+	return &Hub{
+		ServerID:         serverID,
+		connMan:          NewConnectionManager(),
+		sessions:         NewSessionIndex(),
+		subs:             NewSubscriptionIndex(),
+		ConnectionPolicy: PolicyMultiDevice,
+		ctx:              ctx,
+	}
 }
 
 // Context 返回 Hub 的根 context，供 comet 派生每连接的子 context。
 func (h *Hub) Context() context.Context { return h.ctx }
 
-// AddClient 直接在分片锁下登记连接（无中间 goroutine）。
+// roomChannel 把 roomID 映射为内部 channel key（Room Broadcast 兼容层）。
+func (h *Hub) roomChannel(roomID string) string { return "danmu:room:" + roomID }
+
+// channelRoom 内部 channel key 反向还原 roomID；非 danmu:room: 前缀的 channel 原样返回
+// （Phase 2/3 引入通用 Channel 目标后，这里承载无缝扩展）。
+func (h *Hub) channelRoom(channel string) string {
+	const prefix = "danmu:room:"
+	if len(channel) > len(prefix) && channel[:len(prefix)] == prefix {
+		return channel[len(prefix):]
+	}
+	return channel
+}
+
+// nextConnectionID 生成本机稳定 ConnectionID：gatewayID + 单调递增序号。
+func (h *Hub) nextConnectionID() string {
+	return h.ServerID + "-conn-" + strconv.FormatUint(h.connSeq.Add(1), 10)
+}
+
+// AddClient 登记一个新连接：分配 ConnectionID / DeviceID / GatewayID，写入
+// ConnectionManager + SessionIndex + SubscriptionIndex（订阅其 room 对应的 channel）。
+// 默认（PolicyMultiDevice）不做顶号；PolicySingleDevicePerUser 下先顶掉该用户旧连接。
 func (h *Hub) AddClient(c *Client) {
-	shard := h.shardFor(c.RoomID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	room, ok := shard.rooms[c.RoomID]
-	if !ok {
-		room = make(map[string]*Client)
-		shard.rooms[c.RoomID] = room
-		h.roomCount.Add(1) // 新房间
+	if c.ConnectionID == "" {
+		c.ConnectionID = h.nextConnectionID()
 	}
-	if old, exists := room[c.UID]; exists {
-		// 同 uid 顶号：用明确的关闭码关旧连接（bare cancel 会让 WritePump 误报
-		// "server shutting down"），新连接顶替其位置。
-		old.Close(4009, "session replaced by new connection")
-	} else {
-		h.connCount.Add(1) // 顶号替换不算新增连接（旧连接走 cancel 退出，不会再 RemoveClient 计数）
+	if c.DeviceID == "" {
+		c.DeviceID = DefaultDeviceID
 	}
-	room[c.UID] = c
+	c.GatewayID = h.ServerID
+
+	if h.ConnectionPolicy == PolicySingleDevicePerUser {
+		for _, old := range h.sessions.GetUserConnections(c.UID) {
+			if old == c {
+				continue
+			}
+			h.RemoveClient(old)
+			old.Close(4009, "session replaced by new connection")
+		}
+	}
+	h.connMan.Add(c)
+	h.sessions.Add(c)
+	h.subs.Subscribe(h.roomChannel(c.RoomID), c)
 	MetricConnInc()
 }
 
+// RemoveClient 连接断开清理：从三个索引全部移除（幂等；未登记的连接空跑不递减）。
 func (h *Hub) RemoveClient(c *Client) {
-	shard := h.shardFor(c.RoomID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	room, ok := shard.rooms[c.RoomID]
-	if !ok {
-		return
+	if !h.connMan.Remove(c) {
+		return // 从未登记（或已被清理），不递减计数
 	}
-	if existing, exists := room[c.UID]; exists && existing == c {
-		delete(room, c.UID)
-		h.connCount.Add(-1)
-		if len(room) == 0 {
-			delete(shard.rooms, c.RoomID)
-			h.roomCount.Add(-1)
-		}
-	}
+	h.sessions.Remove(c)
+	h.subs.RemoveConn(c)
 }
 
-// BroadcastToRoom 向房间所有连接非阻塞下发；sendCh 满则丢弃并计数。
-// 持锁约束：持 RLock 只做 channel send，不发 RPC。
+// BroadcastToRoom 向房间对应 channel 的所有连接非阻塞下发；sendCh 满则丢弃并计数。
+// 语义与旧 Hub 一致。
 func (h *Hub) BroadcastToRoom(roomID string, data []byte) int {
-	shard := h.shardFor(roomID)
-	shard.mu.RLock()
-	room, ok := shard.rooms[roomID]
-	if !ok {
-		shard.mu.RUnlock()
-		return 0
-	}
-	clients := make([]*Client, 0, len(room))
-	for _, c := range room {
-		clients = append(clients, c)
-	}
-	shard.mu.RUnlock()
-
-	delivered, dropped := 0, 0
-	for _, c := range clients {
-		select {
-		case c.sendCh <- data:
-			delivered++
-		default:
-			dropped++
-		}
-	}
-	if dropped > 0 {
-		MetricDropped(dropped)
-	}
-	return delivered
+	return h.subs.PushChannel(h.roomChannel(roomID), data)
 }
 
 // HasRoom 本机是否持有该房间（廉价 RLock 读）。
 func (h *Hub) HasRoom(roomID string) bool {
-	shard := h.shardFor(roomID)
-	shard.mu.RLock()
-	_, ok := shard.rooms[roomID]
-	shard.mu.RUnlock()
-	return ok
+	return h.subs.HasChannel(h.roomChannel(roomID))
 }
 
 type RoomInfo struct {
@@ -149,106 +143,116 @@ type RoomInfo struct {
 
 func (h *Hub) GetRoomList() []RoomInfo {
 	var rooms []RoomInfo
-	for _, shard := range h.shards {
-		shard.mu.RLock()
-		for id, clients := range shard.rooms {
-			rooms = append(rooms, RoomInfo{RoomID: id, OnlineCount: len(clients), IsActive: true})
-		}
-		shard.mu.RUnlock()
+	for _, channel := range h.subs.ChannelList() {
+		subs := h.subs.GetSubscribers(channel)
+		rooms = append(rooms, RoomInfo{
+			RoomID:      h.channelRoom(channel),
+			OnlineCount: len(subs),
+			IsActive:    true,
+		})
 	}
 	return rooms
 }
 
 func (h *Hub) GetRoomClients(roomID string) ([]string, bool) {
-	shard := h.shardFor(roomID)
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-	room, ok := shard.rooms[roomID]
-	if !ok {
+	subs := h.subs.GetSubscribers(h.roomChannel(roomID))
+	if len(subs) == 0 {
 		return nil, false
 	}
-	uids := make([]string, 0, len(room))
-	for uid := range room {
-		uids = append(uids, uid)
+	seen := make(map[string]struct{}, len(subs))
+	uids := make([]string, 0, len(subs))
+	for _, c := range subs {
+		if _, dup := seen[c.UID]; dup {
+			continue // 同一用户多连接只列一次（旧语义 uid 列表）
+		}
+		seen[c.UID] = struct{}{}
+		uids = append(uids, c.UID)
 	}
 	return uids, true
 }
 
-// 注意：CloseRoom/KickClient 直接删分片条目，被关连接的 ReadPump 退出时会调
-// RemoveClient，但那时条目已不存在，RemoveClient 会 early return 不再递减——
-// 所以这里的原子计数必须在此同步递减，否则 OnlineCount/RoomCountFast 永久偏高。
+// CloseRoom 关闭某房间：把该 channel 的订阅连接全部从索引移除并 Close。
+// 多设备语义：房间内该连接无论几个设备一起关闭。返回该房间是否存在。
 func (h *Hub) CloseRoom(roomID string) bool {
-	shard := h.shardFor(roomID)
-	shard.mu.Lock()
-	room, ok := shard.rooms[roomID]
-	if !ok {
-		shard.mu.Unlock()
+	channel := h.roomChannel(roomID)
+	subs := h.subs.GetSubscribers(channel)
+	if len(subs) == 0 {
 		return false
 	}
-	clients := make([]*Client, 0, len(room))
-	for _, c := range room {
-		clients = append(clients, c)
-	}
-	delete(shard.rooms, roomID)
-	h.connCount.Add(-int64(len(clients)))
-	h.roomCount.Add(-1)
-	shard.mu.Unlock()
-	for _, c := range clients {
+	for _, c := range subs {
+		h.RemoveClient(c)
 		c.Close(4001, "room closed")
 	}
 	return true
 }
 
+// KickClient 踢出指定用户在某房间的全部连接（多设备语义）。
 func (h *Hub) KickClient(roomID, uid string) bool {
-	shard := h.shardFor(roomID)
-	shard.mu.Lock()
-	room, ok := shard.rooms[roomID]
-	if !ok {
-		shard.mu.Unlock()
-		return false
-	}
-	c, exists := room[uid]
-	if !exists {
-		shard.mu.Unlock()
-		return false
-	}
-	delete(room, uid)
-	h.connCount.Add(-1)
-	if len(room) == 0 {
-		delete(shard.rooms, roomID)
-		h.roomCount.Add(-1)
-	}
-	shard.mu.Unlock()
-	c.Close(4001, "kicked")
-	return true
-}
-
-func (h *Hub) GetConnCount() int {
-	count := 0
-	for _, shard := range h.shards {
-		shard.mu.RLock()
-		for _, room := range shard.rooms {
-			count += len(room)
+	channel := h.roomChannel(roomID)
+	subs := h.subs.GetSubscribers(channel)
+	kicked := false
+	for _, c := range subs {
+		if c.UID != uid {
+			continue
 		}
-		shard.mu.RUnlock()
+		h.RemoveClient(c)
+		c.Close(4001, "kicked")
+		kicked = true
 	}
-	return count
+	return kicked
 }
 
-func (h *Hub) GetRoomCount() int {
-	count := 0
-	for _, shard := range h.shards {
-		shard.mu.RLock()
-		count += len(shard.rooms)
-		shard.mu.RUnlock()
-	}
-	return count
+// GetConnCount 总连接数（ConnectionManager 原子计数）。
+func (h *Hub) GetConnCount() int { return int(h.connMan.Count()) }
+
+// GetRoomCount 活跃房间数（SubscriptionIndex 原子计数）。
+func (h *Hub) GetRoomCount() int { return int(h.subs.Count()) }
+
+// OnlineCount 在线连接数（O(1)，替代分片扫描）。
+func (h *Hub) OnlineCount() int64 { return h.connMan.Count() }
+
+// RoomCountFast 活跃房间数（O(1)）。
+func (h *Hub) RoomCountFast() int64 { return h.subs.Count() }
+
+// OnlineUserCount / OnlineDeviceCount 在线用户 / 设备数（O(1)，观测接口用）。
+func (h *Hub) OnlineUserCount() int64   { return h.sessions.CountUsers() }
+func (h *Hub) OnlineDeviceCount() int64 { return h.sessions.CountDevices() }
+
+// --- 多设备查询/定向投递（Phase 1 提供索引查询；Phase 3 的跨机路由在其上叠加） ---
+
+// GetUserConnections 返回某用户本机当前全部连接。
+func (h *Hub) GetUserConnections(uid string) []*Client { return h.sessions.GetUserConnections(uid) }
+
+// GetDeviceConnections 返回某用户指定设备的连接。
+func (h *Hub) GetDeviceConnections(uid, deviceID string) []*Client {
+	return h.sessions.GetDeviceConnections(uid, deviceID)
 }
 
-// OnlineCount 原子计数在线连接数（O(1)，供观测接口用）。
-// 与分片 map 同步维护：AddClient/RemoveClient/CloseRoom/KickClient 均已配套递减。
-// 需要精确值时仍可用 GetConnCount 全扫描（两者应一致）。
-func (h *Hub) OnlineCount() int64 { return h.connCount.Load() }
+// PushUser 定向推送给某用户的全部连接（本机范围）。
+func (h *Hub) PushUser(uid string, data []byte) int {
+	delivered := 0
+	for _, c := range h.sessions.GetUserConnections(uid) {
+		if c.TrySend(data) {
+			delivered++
+		}
+	}
+	if delivered == 0 {
+		return 0
+	}
+	MetricMsgOut(delivered)
+	return delivered
+}
 
-// RoomCountFast 原子计数房间数（O(1)，供观测接口用；与分片 map 同步维护）。
-func (h *Hub) RoomCountFast() int64 { return h.roomCount.Load() }
+// PushDevice 定向推送给某用户指定设备的连接（本机范围）。
+func (h *Hub) PushDevice(uid, deviceID string, data []byte) int {
+	delivered := 0
+	for _, c := range h.sessions.GetDeviceConnections(uid, deviceID) {
+		if c.TrySend(data) {
+			delivered++
+		}
+	}
+	if delivered > 0 {
+		MetricMsgOut(delivered)
+	}
+	return delivered
+}

@@ -207,6 +207,7 @@ func (c *comet) localBroadcast(m uplinkMsg) {
 func (c *comet) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	roomID := r.URL.Query().Get("room")
+	device := r.URL.Query().Get("device")
 	token := r.URL.Query().Get("token")
 	if roomID == "" {
 		http.Error(w, "missing room", http.StatusBadRequest)
@@ -248,6 +249,11 @@ func (c *comet) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := core.NewClient(c.hub, conn, uid, roomID, c.hub.Context())
+	// DeviceID 可选项：客户端经 WS handshake 上报设备标识（Web/iOS/Android/…）；
+	// 未上报时由 Hub 回落 DefaultDeviceID（不强制客户端升级）。
+	if device != "" {
+		client.DeviceID = device
+	}
 	c.hub.AddClient(client)
 	go client.WritePump()
 	go client.ReadPump()
@@ -268,6 +274,7 @@ func main() {
 	etcdEndpoints := flag.String("etcd", "", "etcd 客户端端点(逗号分隔)，如 localhost:2379；配置后注册 comet 并发现 logic")
 	pprofAddr := flag.String("pprof", "", "pprof listen address；默认空=关闭（生产勿开，会暴露运行时信息）")
 	sessionTTL := flag.Duration("session-ttl", 10*time.Minute, "会话令牌有效期")
+	policy := flag.String("policy", "multi", "多设备会话策略：multi=同一用户多设备/多连接并存（默认），single=显式顶号（新连接顶掉该用户旧连接）")
 	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
 	traceBuf := flag.Int("trace-buffer", 512, "trace span 环形缓冲条数")
 	flag.Parse()
@@ -289,6 +296,12 @@ func main() {
 
 	hub := core.NewHub(*id, ctx)
 	hub.TokenIssuer = core.NewTokenIssuer(authToken)
+	if *policy == "single" {
+		hub.ConnectionPolicy = core.PolicySingleDevicePerUser
+		log.Println("[comet] session policy: single-device-per-user (显式顶号)")
+	} else {
+		log.Println("[comet] session policy: multi-device (默认，同一用户多设备并存)")
+	}
 
 	standalone := *etcdEndpoints == ""
 

@@ -30,14 +30,20 @@ type closeState struct {
 
 // Client 一个 WebSocket 连接。writePump 是 conn 唯一写者，所有外发经 sendCh 串行写出。
 type Client struct {
-	hub     *Hub
-	conn    *websocket.Conn
-	sendCh  chan []byte
-	UID     string
-	RoomID  string
-	limiter *TokenBucket
-	ctx     context.Context
-	cancel  context.CancelFunc
+	hub    *Hub
+	conn   *websocket.Conn
+	sendCh chan []byte
+	UID    string
+	RoomID string
+	// 稳定连接身份（Phase 1）：由 Hub.AddClient 分配/补充。
+	// ConnectionID 唯一标识这条连接；DeviceID 标识所属设备（客户端未上报时为
+	// DefaultDeviceID）；GatewayID 是持有它的 comet 实例 id。
+	ConnectionID string
+	DeviceID     string
+	GatewayID    string
+	limiter      *TokenBucket
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	closeOnce sync.Once
 	closeInfo atomic.Pointer[closeState]

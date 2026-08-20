@@ -82,6 +82,37 @@ etcd(:2379) ── logic(:7400 rpc) ── job ── comet-1(:8080 ws, :7500 rp
 - `core` 相对原单体应用了 REVIEW round-2 的 **D1**：去掉 `register/unregister` 单 goroutine 串行化，直接调用分片安全的 `AddClient/RemoveClient`；readPump 通过注入的 `Uplink` 回调把上行交给 comet（而非硬编码 msgQueue）。
 - 不动：`../monolith/server/`（单体基线）、`../monolith/consumer/`、`../monolith/loadtest/`、`web/`。loadtest/web 对 comet 的 WS 协议完全兼容，可直接压测 comet。
 
+## Phase 1：Connection Kernel（多设备连接平面）
+
+> Realtime Messaging Engine 重构第一步：把 room-centric 的 `Hub`（`room → map[uid]Client`）
+> 升级为通用连接平面，为后续 USER/DEVICE/CHANNEL target 与路由感知投递铺路。
+> 见 `core/connkernel.go`、`core/connkernel_test.go`。
+
+### 结构
+
+把原 Hub 的单一房间表拆成三个职责（仍位于共享包 `core`，comet 注入方式的门面不变）：
+
+```text
+ConnectionManager   connectionID -> *Client      连接注册表（本机）
+SessionIndex        userID -> deviceID -> connID[]   多设备会话索引
+SubscriptionIndex   channelID -> connID[]        频道订阅索引
+```
+
+- 每个索引按 key 哈希 256 分片、独立 RWMutex，广播在片锁下只拷贝订阅者列表、释放锁后才 channel send（沿用旧持锁约束）。
+- 兼容映射：`room` 是 `channel` 的特例，key = `danmu:room:<roomID>`；`BroadcastToRoom/CloseRoom/KickClient` 等旧 room API 原样委托到 kernel，comet 的 `PushRoom`/standalone 广播无需改动。
+- 身份：`Client` 新增稳定 `ConnectionID`（`<gatewayID>-conn-<n>`）、`DeviceID`（客户端经 WS `device` 参数上报，未上报回落 `DefaultDeviceID`）、`GatewayID`（= comet 实例 id）。
+
+### 语义变化：uid → 多连接
+
+- 默认 `PolicyMultiDevice`：同一用户可多设备、多连接并存（PRD US-01），底层数据结构不再强制「uid → 单连接」。
+- 旧「顶号」行为保留为显式策略 `PolicySingleDevicePerUser`：comet 启动 `-policy=single` 时新连接顶掉该用户旧连接。
+- 观测：新增 `online_users` / `online_devices` 计数（/api/v1/stats）。
+
+### 验证状态
+
+- `core` 包含 9 个 kernel 验收用例（多连接 / 同设备多连接 / 频道订阅与退订 / 断连清理 / slow-consumer 不回归 / 身份分配 / 单设备策略 / room-channel 兼容），`go test -race ./core/...` 通过。
+- 既有 Danmu 回归：comet `PushRoom → BroadcastToRoom → WS` 路径、`TestHubCounterConsistency`、`TestWritePumpCloseRace` 均保持通过。
+
 ## 运行
 
 **单体基线（对比用，无需中间件）**：见 `README.md`。

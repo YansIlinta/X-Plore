@@ -79,6 +79,8 @@ func (c *comet) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"server_id":      c.id,
 		"conn_count":     c.hub.OnlineCount(), // O(1) 原子计数，替代 256 分片扫描
+		"online_users":   c.hub.OnlineUserCount(),
+		"online_devices": c.hub.OnlineDeviceCount(),
 		"room_count":     c.hub.RoomCountFast(),
 		"qps":            c.lastSecondQPS.Load(),
 		"dropped_uplink": c.droppedUplink.Load(),
