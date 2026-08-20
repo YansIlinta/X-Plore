@@ -3,7 +3,12 @@
 // 单个 Hub.Run goroutine，而是直接调用分片安全的 AddClient/RemoveClient。
 package core
 
-import "sync"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+)
 
 // Message 弹幕消息（服务端下行 / Kafka 载荷）。字段与原单体、consumer 保持一致。
 type Message struct {
@@ -50,3 +55,111 @@ func AcquireMessage() *Message {
 }
 
 func ReleaseMessage(m *Message) { messagePool.Put(m) }
+
+// ---------------------------------------------------------------------------
+// Phase 2: unified realtime message contract.
+//
+// These types deliberately coexist with the legacy Message/UpMessage wire
+// structs above. Phase 2 establishes the domain contract first; protobuf/Kafka
+// migration and cross-Gateway routing happen in subsequent, independently
+// verifiable steps so the existing Danmu path remains a regression baseline.
+
+type TargetType string
+
+const (
+	TargetUser      TargetType = "USER"
+	TargetDevice    TargetType = "DEVICE"
+	TargetChannel   TargetType = "CHANNEL"
+	TargetBroadcast TargetType = "BROADCAST"
+)
+
+type DeliveryClass string
+
+const (
+	DeliveryEphemeral DeliveryClass = "EPHEMERAL"
+	DeliveryReliable  DeliveryClass = "RELIABLE"
+)
+
+type MessageType string
+
+const (
+	MessageDanmu MessageType = "DANMU"
+)
+
+// MessageEnvelope is the internal contract shared by future user/device/channel
+// delivery paths. It is not itself a reliability guarantee: DeliveryReliable
+// becomes meaningful only after persistence, idempotency, sequencing, sync and
+// client ACK are connected in later phases.
+type MessageEnvelope struct {
+	MessageID       string          `json:"message_id,omitempty"`
+	ClientMessageID string          `json:"client_message_id,omitempty"`
+	SenderID        string          `json:"sender_id,omitempty"`
+	TargetType      TargetType      `json:"target_type"`
+	TargetID        string          `json:"target_id,omitempty"`
+	DeliveryClass   DeliveryClass   `json:"delivery_class"`
+	MessageType     MessageType     `json:"message_type"`
+	Sequence        int64           `json:"sequence,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	ClientTS        int64           `json:"client_ts,omitempty"`
+	ServerTS        int64           `json:"server_ts,omitempty"`
+}
+
+func (m MessageEnvelope) Validate() error {
+	switch m.TargetType {
+	case TargetUser, TargetDevice, TargetChannel:
+		if strings.TrimSpace(m.TargetID) == "" {
+			return errors.New("target_id is required for USER/DEVICE/CHANNEL target")
+		}
+	case TargetBroadcast:
+		// Global broadcast intentionally permits an empty target_id.
+	default:
+		return errors.New("invalid target_type")
+	}
+
+	switch m.DeliveryClass {
+	case DeliveryEphemeral, DeliveryReliable:
+	default:
+		return errors.New("invalid delivery_class")
+	}
+
+	if m.MessageType == "" {
+		return errors.New("message_type is required")
+	}
+	return nil
+}
+
+// DanmuChannelID is the single compatibility mapping from legacy room IDs to
+// the generic channel namespace. Routing/experiments should reuse this helper
+// instead of constructing independent channel keys.
+func DanmuChannelID(roomID string) string {
+	return "danmu:room:" + roomID
+}
+
+// DanmuRoomID reverses DanmuChannelID. The bool is false for non-Danmu channels.
+func DanmuRoomID(channelID string) (string, bool) {
+	const prefix = "danmu:room:"
+	if !strings.HasPrefix(channelID, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(channelID, prefix), true
+}
+
+// NewDanmuEnvelope adapts the existing room-broadcast input into the unified
+// contract without changing its semantics: Danmu remains CHANNEL + EPHEMERAL,
+// so the current bounded-queue/drop-on-backpressure behavior is preserved.
+func NewDanmuEnvelope(roomID, senderID, content string, clientTS, serverTS int64) MessageEnvelope {
+	payload, _ := json.Marshal(struct {
+		Content string `json:"content"`
+	}{Content: content})
+
+	return MessageEnvelope{
+		SenderID:      senderID,
+		TargetType:    TargetChannel,
+		TargetID:      DanmuChannelID(roomID),
+		DeliveryClass: DeliveryEphemeral,
+		MessageType:   MessageDanmu,
+		Payload:       payload,
+		ClientTS:      clientTS,
+		ServerTS:      serverTS,
+	}
+}
