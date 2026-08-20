@@ -127,6 +127,50 @@ export default function Compare() {
             </div>
           </div>
           <div className="panel">
+            <div className="panel-head">Experiment comparison (aggregate-level)</div>
+            <div className="panel-body">
+              {result.left_agg && result.right_agg ? (
+                <>
+                  {result.comparable === false ? (
+                    <div className="error-banner">
+                      <b>NOT DIRECTLY COMPARABLE</b> — {result.comparable_note}
+                    </div>
+                  ) : (
+                    <div className="hint">
+                      Same spec (spec_hash match) + same measurement window ⇒ strong conclusions allowed.
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <div style={{ flex: "1 1 300px", minWidth: 260 }}>
+                      <div className="panel-sub">{result.left.name}</div>
+                      <div className="mono-dim">
+                        {result.left_agg.successful_reps}/{result.left_agg.total_reps} reps · stability {result.left_agg.stability} · window {result.left_agg.measure_window}
+                      </div>
+                    </div>
+                    <div style={{ flex: "1 1 300px", minWidth: 260 }}>
+                      <div className="panel-sub">{result.right.name}</div>
+                      <div className="mono-dim">
+                        {result.right_agg.successful_reps}/{result.right_agg.total_reps} reps · stability {result.right_agg.stability} · window {result.right_agg.measure_window}
+                      </div>
+                    </div>
+                  </div>
+                  {result.diff_conclusion && (
+                    <div className="hint" style={{ marginTop: 8 }}>
+                      <b>Conclusion: {result.diff_conclusion}</b>
+                    </div>
+                  )}
+                  {result.diff_lines?.map((l, i) => (
+                    <div key={i} className="mono-dim" style={{ fontFamily: "var(--mono)", fontSize: 12 }}>
+                      • {l}
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div className="hint">Both experiments must be aggregated (have runs) for aggregate-level comparison.</div>
+              )}
+            </div>
+          </div>
+          <div className="panel">
             <div className="panel-head">Summary (rule-based, deterministic — no LLM)</div>
             <div className="panel-body">
               {result.summary.map((s) => (

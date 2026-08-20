@@ -410,6 +410,23 @@ export interface CompareResp {
   rows: CompareRow[];
   summary: string[];
   net: string;
+  comparable?: boolean;
+  comparable_note?: string;
+  left_agg?: AggregateBrief | null;
+  right_agg?: AggregateBrief | null;
+  diff_conclusion?: string;
+  diff_lines?: string[];
+}
+
+export interface AggregateBrief {
+  id: string;
+  successful_reps: number;
+  total_reps: number;
+  stability: string;
+  spec_hash: string;
+  measure_window: string;
+  warmup: string;
+  metric_aggregates: Record<string, MetricAggregate>;
 }
 
 // ---- Sweep / Regime（Phase 1.5）----
