@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package danmu;
+
+option go_package = "github.com/YansIlinta/danmu-distributed/pb;pb";
+
+// RealtimeDeliveryService is the generic Gateway-local delivery boundary for
+// Phase 2/3. Cross-Gateway route lookup happens before this RPC; the selected
+// Gateway then dispatches the envelope against its local Connection Kernel.
+//
+// The legacy CometService.PushRoom RPC remains in danmu.proto as a compatibility
+// path while the distributed Job pipeline migrates incrementally.
+service RealtimeDeliveryService {
+  rpc PushEnvelope(PushEnvelopeReq) returns (PushEnvelopeResp);
+}
+
+enum TargetType {
+  TARGET_TYPE_UNSPECIFIED = 0;
+  TARGET_USER = 1;
+  TARGET_DEVICE = 2;
+  TARGET_CHANNEL = 3;
+  TARGET_BROADCAST = 4;
+}
+
+enum DeliveryClass {
+  DELIVERY_CLASS_UNSPECIFIED = 0;
+  DELIVERY_EPHEMERAL = 1;
+  // Schema value only in Phase 2. It does not imply durable persistence,
+  // idempotency, sequencing, offline sync or client ACK until Phase 4 exists.
+  DELIVERY_RELIABLE = 2;
+}
+
+message DeliveryEnvelope {
+  string message_id = 1;
+  string client_message_id = 2;
+  string sender_id = 3;
+
+  TargetType target_type = 4;
+  // USER: user id; DEVICE: device id; CHANNEL: channel id; BROADCAST: empty.
+  string target_id = 5;
+  // DEVICE target only. Device IDs are scoped by user in SessionIndex.
+  string target_user_id = 6;
+
+  DeliveryClass delivery_class = 7;
+  string message_type = 8;
+  int64 sequence = 9;
+  bytes payload = 10;
+  int64 client_ts = 11;
+  int64 server_ts = 12;
+}
+
+message PushEnvelopeReq {
+  DeliveryEnvelope envelope = 1;
+  // Final bytes for the current WebSocket client. This intentionally remains
+  // separate from envelope.payload during migration because legacy Danmu uses
+  // an existing []Message JSON wire representation.
+  bytes client_payload = 2;
+}
+
+message PushEnvelopeResp {
+  int32 delivered = 1;
+}
