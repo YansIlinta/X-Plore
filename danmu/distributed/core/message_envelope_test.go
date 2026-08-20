@@ -44,7 +44,7 @@ func TestMessageEnvelopeValidateTargets(t *testing.T) {
 		MessageType:   MessageDanmu,
 	}
 
-	for _, tt := range []TargetType{TargetUser, TargetDevice, TargetChannel} {
+	for _, tt := range []TargetType{TargetUser, TargetChannel} {
 		m := base
 		m.TargetType = tt
 		if err := m.Validate(); err == nil {
@@ -54,6 +54,17 @@ func TestMessageEnvelopeValidateTargets(t *testing.T) {
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s with target_id should validate: %v", tt, err)
 		}
+	}
+
+	device := base
+	device.TargetType = TargetDevice
+	device.TargetID = "web"
+	if err := device.Validate(); err == nil {
+		t.Fatal("DEVICE target without target_user_id must fail validation")
+	}
+	device.TargetUserID = "user-1"
+	if err := device.Validate(); err != nil {
+		t.Fatalf("DEVICE target with user+device should validate: %v", err)
 	}
 
 	broadcast := base
