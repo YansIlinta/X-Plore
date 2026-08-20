@@ -210,6 +210,15 @@ func (c *Collector) Snapshot() Snapshot {
 // Events 返回最近 n 条事件。
 func (c *Collector) Events(n int) []Event { return c.events.Recent(n) }
 
+// AddEvent 让旁路模块（如实验管理器）把自身的生命周期事件并入统一事件流。
+// 只追加到有界环形缓冲，不影响任何采集循环。
+func (c *Collector) AddEvent(level, kind, message string) {
+	if c == nil {
+		return
+	}
+	c.events.Add(Event{TS: time.Now(), Level: level, Kind: kind, Message: message})
+}
+
 // pollLoop 主采集循环：etcd → 实例探测 → 聚合 → 事件 diff。
 func (c *Collector) pollLoop(ctx context.Context) {
 	c.pollOnce(true) // 启动先采一轮，避免 API 冷启动全是 null

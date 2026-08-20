@@ -41,6 +41,9 @@ type loadtestManager struct {
 	report    map[string]any // 结束后 --output-json 的完整报告
 	err       string
 	cancel    context.CancelFunc
+	// onDone 在子进程结束后、锁外被调用一次（report 可为 nil；errMsg 非空=异常退出）。
+	// 是实验管理器感知"压测结束"的唯一事件通道；不用轮询。
+	onDone func(report map[string]any, errMsg string)
 }
 
 // NewLoadtestManager 构造压测管理器。bin 是相对/绝对路径或 PATH 里的可执行名；
@@ -142,15 +145,21 @@ func (m *loadtestManager) Start(params map[string]any) error {
 		if data, rerr := os.ReadFile(reportPath); rerr == nil {
 			_ = json.Unmarshal(data, &report)
 		}
+		var finalErr string
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		m.running = false
 		m.cancel = nil
 		if err != nil && ctx.Err() == nil {
-			m.err = fmt.Sprintf("exit: %v; stderr tail: %s", err, tail(out.String(), 300))
+			finalErr = fmt.Sprintf("exit: %v; stderr tail: %s", err, tail(out.String(), 300))
+			m.err = finalErr
 		}
 		if report != nil {
 			m.report = report
+		}
+		cb := m.onDone
+		m.mu.Unlock()
+		if cb != nil {
+			cb(report, finalErr)
 		}
 	}()
 	return nil

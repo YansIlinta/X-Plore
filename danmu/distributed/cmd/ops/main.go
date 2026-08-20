@@ -28,6 +28,9 @@ func main() {
 	poll := flag.Duration("poll", 2*time.Second, "采集周期")
 	mock := flag.Bool("mock", false, "mock 模式：喂演示数据（响应带 mock:true，UI 显著标记）")
 	loadtestBin := flag.String("loadtest-bin", "bin/loadtest", "loadtest 二进制路径（../monolith 构建）；不存在则压测功能不可用")
+	dataDir := flag.String("data-dir", "./data", "Realtime Systems Lab 数据目录（experiments/ 子目录存 JSON 记录）")
+	repoDir := flag.String("repo-dir", "", "Git 仓库目录（采集实验的 commit/dirty 元数据；空=跳过 git 信息）")
+	historyLimit := flag.Int("experiment-history", 200, "实验历史有界加载条数")
 	flag.Parse()
 
 	if *token == "" {
@@ -60,7 +63,14 @@ func main() {
 		}
 	}
 
-	api := ops.NewAPI(col, lt)
+	// Realtime Systems Lab：旁路实验层（JSON 文件存储，绝不引入 DB / 绝不进消息主链）。
+	store, err := ops.NewExperimentStore(*dataDir, *historyLimit)
+	if err != nil {
+		log.Fatalf("[ops] experiment store init failed: %v", err)
+	}
+	em := ops.NewExperimentManager(store, lt, *repoDir, col)
+
+	api := ops.NewAPI(col, em)
 
 	// 路由：/api/* 给观测 API，其余走内嵌前端（SPA fallback：未知路径回 index.html）。
 	mux := http.NewServeMux()

@@ -10,13 +10,14 @@ import (
 )
 
 // API 是 Ops Console 的 HTTP 面。GET 全部只读，读取 Collector 的最新快照；
-// 仅 loadtest 的 start/stop 是 ACTION（启停压测子进程）。
+// 仅实验/压测的 start/stop 是 ACTION（启停 loadtest 子进程）。
+// 状态机的唯一主人是 ExperimentManager；旧的 /api/loadtest/* 只是它的兼容入口。
 type API struct {
 	col *Collector
-	lt  *loadtestManager
+	em  *ExperimentManager
 }
 
-func NewAPI(col *Collector, lt *loadtestManager) *API { return &API{col: col, lt: lt} }
+func NewAPI(col *Collector, em *ExperimentManager) *API { return &API{col: col, em: em} }
 
 // Handler 返回路由 mux。
 func (a *API) Handler() http.Handler {
@@ -29,6 +30,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/traces", a.handleTraces)
 	mux.HandleFunc("/api/rooms", a.handleRooms)
 	mux.HandleFunc("/api/rooms/", a.handleRoomDetail)
+	// Realtime Systems Lab（实验/对比/证据/预设）
+	a.registerExperimentRoutes(mux)
+	// 旧 loadtest 端点保留为 ExperimentManager 的兼容入口
 	mux.HandleFunc("/api/loadtest/status", a.handleLoadtestStatus)
 	mux.HandleFunc("/api/loadtest/start", a.handleLoadtestStart)
 	mux.HandleFunc("/api/loadtest/stop", a.handleLoadtestStop)
@@ -333,10 +337,10 @@ func (a *API) handleRoomDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---- Loadtest（ACTION 类：启停压测子进程）----
+// ---- Loadtest（兼容 ACTION：全部委托 ExperimentManager——单状态机，见 OPS.md）----
 
 func (a *API) handleLoadtestStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.lt.Status())
+	writeJSON(w, http.StatusOK, a.em.LegacyStatus())
 }
 
 func (a *API) handleLoadtestStart(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +352,7 @@ func (a *API) handleLoadtestStart(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&params) // 空 body 用默认参数
 	}
-	if err := a.lt.Start(params); err != nil {
+	if err := a.em.LegacyStart(params); err != nil {
 		code := http.StatusConflict
 		if strings.Contains(err.Error(), "not found") {
 			code = http.StatusServiceUnavailable
@@ -364,6 +368,9 @@ func (a *API) handleLoadtestStop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
 	}
-	a.lt.Stop()
+	if err := a.em.LegacyStop(); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"stopped": true})
 }
