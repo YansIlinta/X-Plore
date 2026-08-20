@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,20 +44,23 @@ type UpMessage struct {
 //   - ack  ：服务端 ack 数（"type":"ack" 出现次数）
 //   - high ：高优消息数（"priority":1 出现次数）
 //   - nanos：每条消息的 client_ts_ns 值（追加到传入切片以复用缓冲）
+//   - seqs ：每条弹幕消息的 room seq 值（仅 wantSeq=true 时做第二遍扫描）
 //
 // 正确性前提：服务端 json 序列化字段顺序稳定（Type 在首）、内容字段被 JSON
-// 转义（用户文本里的 "type":"danmu" 不会误匹配）。字节扫描比整帧 json.Unmarshal
-// 快一个量级，是万级连接满扇出下客户端能跟上投递的关键。
-func scanFrame(data []byte, nanos []int64) (danmu, ack, high int, out []int64) {
+// 转义（用户文本里的 "type":"danmu" 不会误匹配）。seq 只在广播弹幕消息上出现
+// （ack 只有 msg_id；reconnect 的 after_seq 带下划线，不会误匹配 "seq":）。
+// 字节扫描比整帧 json.Unmarshal 快一个量级，是万级连接满扇出下客户端能跟上投递的关键。
+func scanFrame(data []byte, nanos, seqs []int64, wantSeq bool) (danmu, ack, high int, out []int64, outSeqs []int64) {
 	danmu = bytes.Count(data, []byte(`"type":"danmu"`))
 	ack = bytes.Count(data, []byte(`"type":"ack"`))
 	high = bytes.Count(data, []byte(`"priority":1`))
 	out = nanos[:0]
+	outSeqs = seqs[:0]
 	rest := data
 	for {
 		idx := bytes.Index(rest, []byte(`"client_ts_ns":`))
 		if idx < 0 {
-			return
+			break
 		}
 		rest = rest[idx+len(`"client_ts_ns":`):]
 		var v int64
@@ -65,6 +72,65 @@ func scanFrame(data []byte, nanos []int64) (danmu, ack, high int, out []int64) {
 		out = append(out, v)
 		rest = rest[j:]
 	}
+	if wantSeq {
+		rest = data
+		for {
+			idx := bytes.Index(rest, []byte(`"seq":`))
+			if idx < 0 {
+				break
+			}
+			rest = rest[idx+len(`"seq":`):]
+			var v int64
+			j := 0
+			for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+				v = v*10 + int64(rest[j]-'0')
+				j++
+			}
+			outSeqs = append(outSeqs, v)
+			rest = rest[j:]
+		}
+	}
+	return
+}
+
+// deliveryTracker 是单连接的 seq 连续性跟踪器（-delivery-check 用）。
+// 语义：期望 nextSeq = lastSeq+1。缺口 = 服务端广播了但该连接没收到、
+// 或出现顺序跳跃（丢消息）。replay（seq <= lastSeq）不计缺口不计数。
+type deliveryTracker struct {
+	epoch      uint64
+	lastSeq    int64
+	contiguous int64
+	gaps       int64
+}
+
+// onSeqs 处理一帧内的若干弹幕消息 seq，返回 (累计连续投递数, 累计缺口数)。
+func (t *deliveryTracker) onSeqs(ep uint64, seqs []int64) (int64, int64) {
+	if ep != t.epoch {
+		// epoch 变化 = 测量窗口重置（warm-up → measurement）。
+		t.epoch = ep
+		t.lastSeq = 0
+		t.contiguous = 0
+		t.gaps = 0
+	}
+	for _, s := range seqs {
+		if t.lastSeq == 0 {
+			t.contiguous++
+			t.lastSeq = s
+			continue
+		}
+		switch {
+		case s == t.lastSeq+1:
+			t.contiguous++
+			t.lastSeq = s
+		case s > t.lastSeq+1:
+			t.gaps += s - t.lastSeq - 1 // 缺口：被跳过的 seq 数
+			t.contiguous++
+			t.lastSeq = s
+		default:
+			// replay / stale：忽略（不判缺口，不计数）。
+		}
+	}
+	return t.contiguous, t.gaps
 }
 
 // Metrics 收集压测期间的指标。
@@ -98,18 +164,32 @@ type Metrics struct {
 	sentHigh atomic.Int64 // 发送的高优先级消息数
 	recvHigh atomic.Int64 // 收到的高优先级消息数（含自己回声）
 
+	// 投递核算（-delivery-check）：按连接 seq 连续性。
+	deliveryObserved atomic.Int64
+	deliveryMissing  atomic.Int64
+	deliveryEnabled  bool
+
 	// 延迟层（端到端，微秒），分片降低锁竞争
-	e2eShards []*e2eShard
+	e2eShardsAtomic atomic.Value // 持有一个 []*e2eShard（measureStart 重置时整体替换）
 
 	// 错误层
 	writeErrors atomic.Int64
 	readErrors  atomic.Int64
 	timeouts    atomic.Int64
 
+	// 测量窗基线（measureStart 时快照，报告用 Window 值）
+	baseSent atomic.Int64
+	baseRecv atomic.Int64
+	baseAck  atomic.Int64
+	baseDrop atomic.Int64
+	baseWE   atomic.Int64
+	baseRE   atomic.Int64
+	epoch    atomic.Uint64 // warm-up 结束 / 测量开始 = epoch+1
+
 	mu sync.Mutex // 仅保护 connLatencyHR
 }
 
-func NewMetrics(targetConns int64) *Metrics {
+func NewMetrics(targetConns int64, deliveryEnabled bool) *Metrics {
 	nShards := runtime.NumCPU()
 	if nShards < 8 {
 		nShards = 8
@@ -121,11 +201,13 @@ func NewMetrics(targetConns int64) *Metrics {
 	for i := range shards {
 		shards[i] = &e2eShard{h: hdrhistogram.New(1, 60_000_000_000, 3)} // 1μs ~ 60000s
 	}
-	return &Metrics{
-		targetConns:   targetConns,
-		connLatencyHR: hdrhistogram.New(1, 60_000_000, 3), // 1μs ~ 60s
-		e2eShards:     shards,
+	m := &Metrics{
+		targetConns:     targetConns,
+		connLatencyHR:   hdrhistogram.New(1, 60_000_000, 3), // 1μs ~ 60s
+		deliveryEnabled: deliveryEnabled,
 	}
+	m.e2eShardsAtomic.Store(shards)
+	return m
 }
 
 func (m *Metrics) RecordConnLatency(d time.Duration) {
@@ -140,7 +222,8 @@ func (m *Metrics) RecordE2ELatency(shardIdx int, d time.Duration) {
 	if us < 1 {
 		us = 1
 	}
-	s := m.e2eShards[shardIdx%len(m.e2eShards)]
+	shards := m.e2eShardsAtomic.Load().([]*e2eShard)
+	s := shards[shardIdx%len(shards)]
 	s.mu.Lock()
 	s.h.RecordValue(us)
 	s.mu.Unlock()
@@ -149,13 +232,44 @@ func (m *Metrics) RecordE2ELatency(shardIdx int, d time.Duration) {
 // e2eMerged 合并所有分片为一个直方图，供快照/报告读取分位数
 func (m *Metrics) e2eMerged() *hdrhistogram.Histogram {
 	merged := hdrhistogram.New(1, 60_000_000_000, 3)
-	for _, s := range m.e2eShards {
+	for _, s := range m.e2eShardsAtomic.Load().([]*e2eShard) {
 		s.mu.Lock()
 		merged.Merge(s.h)
 		s.mu.Unlock()
 	}
 	return merged
 }
+
+// ResetMeasurement 在 measureStart（warm-up 结束）把测量基线清零：
+// 记录计数器基线、替换 e2e 直方图、推进 epoch。warm-up 段数据不再计入最终统计。
+func (m *Metrics) ResetMeasurement() {
+	m.baseSent.Store(m.sendCount.Load())
+	m.baseRecv.Store(m.recvCount.Load())
+	m.baseAck.Store(m.ackCount.Load())
+	m.baseDrop.Store(m.dropCount.Load())
+	m.baseWE.Store(m.writeErrors.Load())
+	m.baseRE.Store(m.readErrors.Load())
+	m.epoch.Add(1)
+	nShards := runtime.NumCPU()
+	if nShards < 8 {
+		nShards = 8
+	}
+	if nShards > 256 {
+		nShards = 256
+	}
+	shards := make([]*e2eShard, nShards)
+	for i := range shards {
+		shards[i] = &e2eShard{h: hdrhistogram.New(1, 60_000_000_000, 3)}
+	}
+	m.e2eShardsAtomic.Store(shards)
+}
+
+// WindowSent / WindowRecv 返回测量窗内的真实计数（非累计）。
+func (m *Metrics) WindowSent() int64 { return m.sendCount.Load() - m.baseSent.Load() }
+func (m *Metrics) WindowRecv() int64 { return m.recvCount.Load() - m.baseRecv.Load() }
+func (m *Metrics) WindowDrop() int64 { return m.dropCount.Load() - m.baseDrop.Load() }
+func (m *Metrics) WindowWE() int64   { return m.writeErrors.Load() - m.baseWE.Load() }
+func (m *Metrics) WindowRE() int64   { return m.readErrors.Load() - m.baseRE.Load() }
 
 // --- 每秒统计快照 ---
 
@@ -179,12 +293,25 @@ type Snapshot struct {
 
 // --- 主程序 ---
 
+// runSalt 是本进程一次运行的唯一后缀。没有它，连续两次压测会复用相同的
+// msg_id（bench-N-seq），落在服务端 30s 幂等窗口内被当作重复、只回 ack 不广播，
+// 导致第二次压测 recv=0 —— 这是重复基准的核心绊脚石。
+var runSalt = newRunSalt()
+
+func newRunSalt() string {
+	b := make([]byte, 4)
+	if _, err := cryptorand.Read(b); err == nil {
+		return hex.EncodeToString(b)
+	}
+	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
 func main() {
 	servers := flag.String("server", "ws://localhost:8080", "Server URLs (comma separated)")
 	conns := flag.Int("conns", 1000, "Number of connections")
 	rooms := flag.Int("rooms", 10, "Number of rooms")
 	rate := flag.Float64("rate", 1.0, "Messages per second per connection")
-	duration := flag.Duration("duration", 30*time.Second, "Test duration")
+	duration := flag.Duration("duration", 30*time.Second, "Measurement window duration")
 	ramp := flag.Duration("ramp", 5*time.Second, "Ramp-up duration for connections")
 	token := flag.String("token", "danmu-secret-token", "Auth token")
 	pprofAddr := flag.String("pprof", ":6061", "pprof listen address")
@@ -194,10 +321,15 @@ func main() {
 	priorityRatio := flag.Float64("priority-ratio", 0, "发送消息中高优先级(priority=1)的比例 0~1（0=全部普通）")
 	reauthEvery := flag.Duration("reauth-every", 8*time.Minute, "会话令牌续期间隔（需小于服务端 -session-ttl 默认 10min，否则长跑会被 4008 断开）")
 	noReauth := flag.Bool("no-reauth", false, "禁用会话续期（短时压测用）")
+	warmup := flag.Duration("warmup", 0, "Warm-up duration：期间发送流量但不计入测量（measureStart 重置计数器/直方图）")
+	dist := flag.String("dist", "uniform", "Room popularity distribution: uniform | hot_room | zipf")
+	zipfS := flag.Float64("zipf-s", 1.1, "zipf 分布的 s 参数（>0；越大越集中）")
+	seed := flag.Int64("seed", 1, "Deterministic random seed（相同 seed 产出相同房间分配）")
+	deliveryCheck := flag.Bool("delivery-check", false, "开启 per-connection seq 缺口投递核算（drops/delivery_rate 才有真实值）")
 	flag.Parse()
 
 	serverList := strings.Split(*servers, ",")
-	metrics := NewMetrics(int64(*conns))
+	metrics := NewMetrics(int64(*conns), *deliveryCheck)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -226,10 +358,36 @@ func main() {
 		return
 	}
 
-	// 每秒打印指标
+	// 测量窗口：warm-up 时段发送流量（让系统满负荷预热）但统计数据全被归零；
+	// measureStart 后开始计量；sendEnd 停止发送。总挂起时间 = warmup+duration+ramp。
+	measureStart := time.Now().Add(*warmup)
+	sendEnd := measureStart.Add(*duration)
+	log.Printf("[loadtest] measurement window: warmup=%s measureStart=%s duration=%s sendEnd=%s",
+		*warmup, measureStart.Format(time.RFC3339), *duration, sendEnd.Format(time.RFC3339))
+	// 测量窗重置：恰在 warm-up 结束后清零基线 + 换直方图（边界后流量才计入测量）。
+	if *warmup > 0 {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Until(measureStart)):
+			}
+			metrics.ResetMeasurement()
+			log.Println("[loadtest] warm-up ended; measurement window started")
+		}()
+	}
+
+	// 每秒打印指标（从测量窗开始才打印，快照标测量窗内值）
 	var snapshots []Snapshot
 	var lastSend, lastRecv int64
 	go func() {
+		if *warmup > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Until(measureStart)):
+			}
+		}
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
@@ -237,8 +395,8 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				curSend := metrics.sendCount.Load()
-				curRecv := metrics.recvCount.Load()
+				curSend := metrics.WindowSent()
+				curRecv := metrics.WindowRecv()
 				sendQPS := curSend - lastSend
 				recvQPS := curRecv - lastRecv
 				lastSend = curSend
@@ -283,15 +441,16 @@ func main() {
 		}
 	}()
 
-	// 分批建连（爬坡）
+	// 分批建连（爬坡）；房间分配由分布 + seed 决定（确定性）。
 	var wg sync.WaitGroup
 	rampDelay := *ramp / time.Duration(*conns)
 	if rampDelay < time.Microsecond {
 		rampDelay = time.Microsecond
 	}
+	roomAssign2 := roomAssignFor(*conns, *rooms, *dist, *zipfS, *seed)
 
-	log.Printf("[loadtest] starting: conns=%d rooms=%d rate=%.1f/s duration=%s ramp=%s",
-		*conns, *rooms, *rate, *duration, *ramp)
+	log.Printf("[loadtest] starting: conns=%d rooms=%d rate=%.1f/s warmup=%s measure=%s ramp=%s dist=%s seed=%d",
+		*conns, *rooms, *rate, *warmup, *duration, *ramp, *dist, *seed)
 
 	startTime := time.Now()
 
@@ -304,33 +463,50 @@ func main() {
 
 		wg.Add(1)
 		uid := fmt.Sprintf("bench-%d", i)
-		roomID := fmt.Sprintf("room-%d", i%*rooms)
+		roomID := fmt.Sprintf("room-%d", roomAssign2[i])
 		serverURL := serverList[i%len(serverList)]
 
 		go func(connIdx int, uid, roomID, serverURL string) {
 			defer wg.Done()
-			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, startTime, *priorityRatio, *reauthEvery, *noReauth)
+			runClient(ctx, metrics, connIdx, serverURL, uid, roomID, *token, *rate, *duration, *warmup, *deliveryCheck, measureStart, sendEnd, startTime, *priorityRatio, *reauthEvery, *noReauth)
 		}(i, uid, roomID, serverURL)
 
 		time.Sleep(rampDelay)
 	}
 
-	// 等待 duration
+	// 等待测量窗结束（warmup + duration + ramp 的保守上界）
 	select {
 	case <-ctx.Done():
-	case <-time.After(*duration + *ramp):
+	case <-time.After(*warmup + *duration + *ramp):
 	}
 	cancel()
 
 waitDone:
 	wg.Wait()
 
-	// 打印最终报告
-	printReport(metrics, time.Since(startTime))
+	// 打印最终报告（测量窗内统计）
+	printReport(metrics, time.Since(startTime), *deliveryCheck)
 
 	// 导出 JSON/CSV
 	if *outputJSON != "" {
-		exportJSON(*outputJSON, snapshots, metrics)
+		roomStats := computeRoomStats(roomAssign2, *rooms, *dist)
+		var delivery map[string]any
+		if *deliveryCheck {
+			obs := metrics.deliveryObserved.Load()
+			miss := metrics.deliveryMissing.Load()
+			exp := obs + miss
+			rate := float64(0)
+			if exp > 0 {
+				rate = float64(obs) / float64(exp)
+			}
+			delivery = map[string]any{
+				"enabled": true, "observed_deliveries": obs, "missing_deliveries": miss,
+				"expected_deliveries": exp, "delivery_rate": rate,
+			}
+		} else {
+			delivery = map[string]any{"enabled": false}
+		}
+		exportJSON(*outputJSON, snapshots, metrics, measureStart, (*warmup).String(), (*duration).String(), roomStats, delivery)
 	}
 	if *outputCSV != "" {
 		exportCSV(*outputCSV, snapshots)
@@ -519,7 +695,7 @@ func reauthLoop(ctx context.Context, conn *websocket.Conn, serverURL, uid, roomI
 }
 
 // runClient 单个压测连接
-func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration time.Duration, startTime time.Time, priorityRatio float64, reauthEvery time.Duration, noReauth bool) {
+func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roomID, token string, rate float64, duration, warmup time.Duration, deliveryCheck bool, measureStart, sendEnd, startTime time.Time, priorityRatio float64, reauthEvery time.Duration, noReauth bool) {
 	// 建连
 	wsURL := fmt.Sprintf("%s/ws?uid=%s&room=%s&token=%s", serverURL, uid, roomID, token)
 
@@ -538,8 +714,6 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 	m.RecordConnLatency(connDur)
 
 	// closing 标志：收尾时是"我们主动关连接"，reader 观察到的错误属正常，不计 readError。
-	// 先置位再 Close（defer 内首行），使 reader 在拿到错误时能读到 true，
-	// 区分"测试结束的主动关闭"与"服务端异常断开的真实读错误"。
 	var closing atomic.Bool
 	defer func() {
 		closing.Store(true)
@@ -555,16 +729,20 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
 	// 会话续期：>10min 的压测必须续期，否则服务端 sessionTTL(10min) 到期 4008 断开。
-	// 续期流程（与 web 前端 index.html:304 一致）：REST 换新会话令牌 → WS 发 reauth。
 	if !noReauth && reauthEvery > 0 {
 		go reauthLoop(ctx, conn, serverURL, uid, roomID, token, reauthEvery)
 	}
+
+	// 投递核算（-delivery-check）：本连接维护 seq 连续性。
+	var tracker deliveryTracker
+	var prevObs, prevMiss int64 // 上一帧上报的累计值（用于 delta）
 
 	// 读取 goroutine：收消息、统计延迟
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		var nanos []int64 // 复用的纳秒时间戳缓冲
+		var seqs []int64  // 复用的 seq 缓冲（delivery-check）
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -574,10 +752,9 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 				return
 			}
 
-			// 快速扫描器：只提取压测需要的统计量（danmu/ack/高优计数 + 纳秒时间戳），
-			// 避免整帧 json.Unmarshal——万级连接满扇出下 JSON 解析是接收端瓶颈。
+			// 快速扫描器：只提取压测需要的统计量（danmu/ack/高优计数 + 纳秒时间戳）。
 			nowNano := time.Now().UnixNano()
-			danmu, acks, high, nanos := scanFrame(data, nanos)
+			danmu, acks, high, nanos, seqs := scanFrame(data, nanos, seqs, deliveryCheck)
 			if acks > 0 {
 				m.ackCount.Add(int64(acks))
 			}
@@ -591,12 +768,33 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 						m.RecordE2ELatency(connIdx, time.Duration(latency))
 					}
 				}
+				if deliveryCheck && len(seqs) > 0 {
+					obs, miss := tracker.onSeqs(m.epoch.Load(), seqs)
+					if obs != prevObs {
+						m.deliveryObserved.Add(obs - prevObs)
+						prevObs = obs
+					}
+					if miss != prevMiss {
+						m.deliveryMissing.Add(miss - prevMiss)
+						prevMiss = miss
+					}
+				}
 			}
 		}
 	}()
 
-	// 发送循环
+	// 发送循环：warm-up 结束后才开始发；sendEnd 停止。
 	if rate > 0 {
+		if d := measureStart.Sub(time.Now()); d > 0 {
+			select {
+			case <-ctx.Done():
+				<-readDone
+				return
+			case <-readDone:
+				return
+			case <-time.After(d):
+			}
+		}
 		interval := time.Duration(float64(time.Second) / rate)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -611,7 +809,7 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 			case <-readDone:
 				return
 			case <-ticker.C:
-				if time.Since(startTime) > duration {
+				if time.Now().After(sendEnd) {
 					return
 				}
 				now := time.Now()
@@ -621,7 +819,7 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 					Content:      content,
 					ClientTS:     now.UnixMilli(),
 					ClientTSNano: now.UnixNano(),
-					MsgID:        fmt.Sprintf("%s-%d", uid, seq),
+					MsgID:        fmt.Sprintf("%s-%d-%s", uid, seq, runSalt),
 				}
 				if priorityRatio > 0 && rand.Float64() < priorityRatio {
 					msg.Priority = 1
@@ -641,13 +839,136 @@ func runClient(ctx context.Context, m *Metrics, connIdx int, serverURL, uid, roo
 		select {
 		case <-ctx.Done():
 		case <-readDone:
-		case <-time.After(duration):
+		case <-time.After(time.Until(sendEnd)):
 		}
 	}
 }
 
+// roomAssignFor 依分布 + seed 确定性地把每个连接分配到房间 index（0..rooms-1）。
+// 与 ops 端 workload.go 的算法保持一致（两处皆确定性，供诊断可复现）。
+func roomAssignFor(conns, rooms int, dist string, zipfS float64, seed int64) []int {
+	assign := make([]int, conns)
+	switch dist {
+	case "hot_room":
+		hotBoundary := int(float64(conns) * 0.8)
+		for i := 0; i < conns; i++ {
+			if i < hotBoundary {
+				assign[i] = 0
+			} else {
+				assign[i] = 1 + (i % (rooms - 1))
+			}
+		}
+	case "zipf":
+		s := zipfS
+		if s <= 0 {
+			s = 1.1
+		}
+		g := newZipfFor(rooms, s)
+		r := newSeeded(seed)
+		for i := 0; i < conns; i++ {
+			assign[i] = g.sample(r)
+		}
+	default: // uniform
+		for i := 0; i < conns; i++ {
+			assign[i] = i % rooms
+		}
+	}
+	return assign
+}
+
+// computeRoomStats 依据真实分配计算房间热度诊断（大房在前）。
+func computeRoomStats(assign []int, rooms int, dist string) map[string]any {
+	sizes := make([]int, rooms)
+	for _, r := range assign {
+		if r >= 0 && r < rooms {
+			sizes[r]++
+		}
+	}
+	sorted := append([]int(nil), sizes...)
+	sort.Sort(sort.Reverse(sort.IntSlice(sorted)))
+	out := map[string]any{
+		"distribution":  dist,
+		"rooms":         rooms,
+		"connections":   len(assign),
+		"max_room_size": sorted[0],
+		"min_room_size": sorted[len(sorted)-1],
+	}
+	mean := float64(len(assign)) / float64(rooms)
+	out["mean_room_size"] = mean
+	out["largest_room_share"] = float64(sorted[0]) / float64(len(assign))
+	topN := rooms / 10
+	if topN < 1 {
+		topN = 1
+	}
+	topSum := 0
+	for i := 0; i < topN; i++ {
+		topSum += sorted[i]
+	}
+	out["top_10_percent_room_share"] = float64(topSum) / float64(len(assign))
+	var sizesOut []int
+	for i := 0; i < len(sorted) && i < 200; i++ {
+		sizesOut = append(sizesOut, sorted[i])
+	}
+	out["room_sizes"] = sizesOut
+	return out
+}
+
+// zipfGen 确定性 Zipf 取样（inverse-CDF on splitmix64）。
+type zipfGen struct {
+	cdf []float64
+}
+
+func newZipfFor(rooms int, s float64) *zipfGen {
+	w := make([]float64, rooms)
+	sum := 0.0
+	for k := 1; k <= rooms; k++ {
+		w[k-1] = 1.0 / math.Pow(float64(k), s)
+		sum += w[k-1]
+	}
+	cdf := make([]float64, rooms)
+	acc := 0.0
+	for k := 0; k < rooms; k++ {
+		acc += w[k] / sum
+		cdf[k] = acc
+	}
+	return &zipfGen{cdf: cdf}
+}
+
+func (g *zipfGen) sample(r *seeded) int {
+	u := r.Float64()
+	lo, hi := 0, len(g.cdf)-1
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if g.cdf[mid] < u {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// seeded splitmix64 确定性随机源（独立于 math/rand 全局状态）。
+type seeded struct{ state uint64 }
+
+func newSeeded(seed int64) *seeded {
+	return &seeded{state: uint64(seed)*0x9E3779B97F4A7C15 + 1442695040888963407}
+}
+
+func (s *seeded) next() uint64 {
+	s.state += 0x9E3779B97F4A7C15
+	z := s.state
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	return z ^ (z >> 31)
+}
+
+func (s *seeded) Float64() float64 {
+	return float64(s.next()>>11) / float64(1<<53)
+}
+
 // printReport 打印最终汇总报告
-func printReport(m *Metrics, elapsed time.Duration) {
+func printReport(m *Metrics, elapsed time.Duration, deliveryCheck bool) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
@@ -659,7 +980,7 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	fmt.Println("                    LOAD TEST REPORT")
 	fmt.Println(strings.Repeat("=", 70))
 
-	fmt.Printf("\n%-30s %s\n", "Duration:", elapsed.Round(time.Second))
+	fmt.Printf("\n%-30s %s\n", "Wall Duration:", elapsed.Round(time.Second))
 	fmt.Println()
 
 	// 连接层
@@ -678,17 +999,17 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	fmt.Printf("    Mean: %.0f μs\n", m.connLatencyHR.Mean())
 	fmt.Println()
 
-	// 吞吐层
-	fmt.Println("--- Throughput ---")
-	totalSend := m.sendCount.Load()
-	totalRecv := m.recvCount.Load()
-	ackCount := m.ackCount.Load()
+	// 吞吐层（测量窗内）
+	fmt.Println("--- Throughput (measurement window) ---")
+	totalSend := m.WindowSent()
+	totalRecv := m.WindowRecv()
+	ackCount := m.ackCount.Load() - m.baseAck.Load()
 	sentHigh := m.sentHigh.Load()
 	recvHigh := m.recvHigh.Load()
 	elapsedSec := elapsed.Seconds()
 	fmt.Printf("  %-28s %d (%.0f/s)\n", "Total Sent:", totalSend, float64(totalSend)/elapsedSec)
 	fmt.Printf("  %-28s %d (%.0f/s)\n", "Total Received:", totalRecv, float64(totalRecv)/elapsedSec)
-	fmt.Printf("  %-28s %d\n", "Dropped:", m.dropCount.Load())
+	fmt.Printf("  %-28s %d\n", "Dropped:", m.WindowDrop())
 	ackRate := 0.0
 	if totalSend > 0 {
 		ackRate = float64(ackCount) / float64(totalSend) * 100
@@ -696,13 +1017,30 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	fmt.Printf("  %-28s %.2f%% (%d/%d)\n", "Ack Rate:", ackRate, ackCount, totalSend)
 	fmt.Printf("  %-28s %d\n", "High-prio Sent:", sentHigh)
 	fmt.Printf("  %-28s %d\n", "High-prio Recv:", recvHigh)
-	// 单房间假设：每条高优消息应被房间内全部 conns 收到（含发送者回声）。
-	// 多房间运行时该期望值偏大，仅作量级参考。
 	highLoss := sentHigh*m.targetConns - recvHigh
 	if highLoss < 0 {
 		highLoss = 0
 	}
 	fmt.Printf("  %-28s %d (期望 %d，单房间假设)\n", "High-prio Loss:", highLoss, sentHigh*m.targetConns)
+	fmt.Println()
+
+	// 投递核算
+	fmt.Println("--- Delivery Accounting (-delivery-check) ---")
+	if deliveryCheck {
+		obs := m.deliveryObserved.Load()
+		miss := m.deliveryMissing.Load()
+		exp := obs + miss
+		rate := 1.0
+		if exp > 0 {
+			rate = float64(obs) / float64(exp)
+		}
+		fmt.Printf("  %-28s %d\n", "Observed deliveries (conn-level):", obs)
+		fmt.Printf("  %-28s %d\n", "Missing deliveries (seq gaps):", miss)
+		fmt.Printf("  %-28s %d\n", "Expected deliveries:", exp)
+		fmt.Printf("  %-28s %.6f\n", "Delivery rate:", rate)
+	} else {
+		fmt.Println("  (disabled; pass -delivery-check for real delivery accounting)")
+	}
 	fmt.Println()
 
 	// 延迟层
@@ -722,8 +1060,8 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	// 错误层
 	fmt.Println("--- Errors ---")
 	fmt.Printf("  %-28s %d\n", "Connect Failed:", m.failedConns.Load())
-	fmt.Printf("  %-28s %d\n", "Write Errors:", m.writeErrors.Load())
-	fmt.Printf("  %-28s %d\n", "Read Errors:", m.readErrors.Load())
+	fmt.Printf("  %-28s %d\n", "Write Errors:", m.WindowWE())
+	fmt.Printf("  %-28s %d\n", "Read Errors:", m.WindowRE())
 	fmt.Printf("  %-28s %d\n", "Timeouts:", m.timeouts.Load())
 	fmt.Println()
 
@@ -736,8 +1074,8 @@ func printReport(m *Metrics, elapsed time.Duration) {
 	fmt.Println(strings.Repeat("=", 70))
 }
 
-// exportJSON 导出 JSON 报告
-func exportJSON(path string, snapshots []Snapshot, m *Metrics) {
+// exportJSON 导出 JSON 报告（summary 均为测量窗内值；含测量窗口、房间诊断、投递核算）
+func exportJSON(path string, snapshots []Snapshot, m *Metrics, measureStart time.Time, warmup, measurement string, roomStats, delivery map[string]any) {
 	e2e := m.e2eMerged()
 
 	report := map[string]interface{}{
@@ -745,15 +1083,23 @@ func exportJSON(path string, snapshots []Snapshot, m *Metrics) {
 			"target_conns":  m.targetConns,
 			"success_conns": m.successConns.Load(),
 			"failed_conns":  m.failedConns.Load(),
-			"total_sent":    m.sendCount.Load(),
-			"total_recv":    m.recvCount.Load(),
+			"total_sent":    m.WindowSent(),
+			"total_recv":    m.WindowRecv(),
 			"e2e_p50_us":    e2e.ValueAtPercentile(50),
 			"e2e_p90_us":    e2e.ValueAtPercentile(90),
 			"e2e_p99_us":    e2e.ValueAtPercentile(99),
 			"e2e_p999_us":   e2e.ValueAtPercentile(99.9),
 			"e2e_max_us":    e2e.Max(),
 		},
-		"snapshots": snapshots,
+		"measurement": map[string]any{
+			"start":       measureStart.UTC().Format(time.RFC3339Nano),
+			"end":         time.Now().UTC().Format(time.RFC3339Nano),
+			"warmup":      warmup,
+			"measurement": measurement,
+		},
+		"room_stats": roomStats,
+		"delivery":   delivery,
+		"snapshots":  snapshots,
 	}
 
 	data, _ := json.MarshalIndent(report, "", "  ")

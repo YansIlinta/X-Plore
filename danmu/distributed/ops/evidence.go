@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -50,7 +51,7 @@ type claimSeed struct {
 	notes string
 
 	// 验证规则
-	mode          string                 // "metric" | "code" | "capability"
+	mode          string                 // "metric" | "code" | "capability" | "derived"
 	metric        string                 // metric 模式：取实验该指标的最大值
 	minValue      float64                // metric 模式：达到多少才算 VERIFIED
 	arch          string                 // 限制架构；"" = 任意
@@ -59,6 +60,16 @@ type claimSeed struct {
 	codeEvidence  []string
 	defaultStatus ClaimStatus            // 无实验支撑时的降级状态（目标 → TARGET，代码 → CODE VERIFIED）
 	upgradeOn     func(*Experiment) bool // 有实验满足时从 default 升级到 VERIFIED
+
+	// derived 模式：由存储数据推导状态（Phase 1.5 新 claims）。
+	derive func(completed []*Experiment) deriveResult
+}
+
+// deriveResult 是 derived claim 的推导结果。
+type deriveResult struct {
+	status   ClaimStatus
+	evidence []string
+	expID    *string
 }
 
 // claimSeeds 是仓库现状下的真实 claim 清单。数字阈值是本项目文档中的目标/实测点。
@@ -115,6 +126,222 @@ var claimSeeds = []claimSeed{
 		defaultStatus: ClaimCodeVerified,
 		notes:         "CODE VERIFIED：本 lab 层把 workload、git commit、环境快照、结果报告一并落盘；可复现性由 Evidence/报告页反过来可查证。",
 	},
+	// --- Phase 1.5：可重复基准 / 配置 / 跨 workload regime（全部由存储数据推导状态）---
+	{
+		id: "claim-repeatability-observed", claim: "同一 workload 重复运行结果可复现：存在多 repetition 实验且统计聚合稳定",
+		mode:          "derived",
+		defaultStatus: ClaimUnknown,
+		notes:         "存在 2+ 成功 repetition 的实验（有 Aggregate），且主稳定性指标（p90 CV）< 0.30 时 VERIFIED；否则 UNKNOWN/PARTIAL。只为「可重复基准」发声，不暗示任何环境通用。",
+		derive:        deriveRepeatability,
+	},
+	{
+		id: "claim-hot-room-higher-tail-latency", claim: "Hot Room（高扇出）比 Low Fanout 有更高的尾部延迟（P99）",
+		mode:          "derived",
+		defaultStatus: ClaimUnknown,
+		notes:         "hot-room regime 实验的 P99 中位数 > low-fanout regime 实验的 P99 中位数时 VERIFIED；regime 数据不足则 UNKNOWN。",
+		derive:        deriveHotRoomTail,
+	},
+	{
+		id: "claim-static-optimum-shifts", claim: "最优 static configuration 随 workload regime 改变",
+		mode:          "derived",
+		defaultStatus: ClaimUnknown,
+		notes:         "跨 regime 分析：不同工作负载选出了不同 best static config 时 VERIFIED；只验证了同配置占优时也记录为 VERIFIED（结论相反但同样有数据）。仅当数据能支撑才 VERIFIED。",
+		derive:        deriveRegimeDependence,
+	},
+	{
+		id: "claim-one-config-dominates-all", claim: "存在一个对全部测试 workload regime 始终占优的 static configuration",
+		mode:          "derived",
+		defaultStatus: ClaimUnknown,
+		notes:         "同一配置在所有 regime 都是 best 时 VERIFIED；否则 UNKNOWN（数据不支持「单一配置统治所有负载」）。",
+		derive:        deriveDominance,
+	},
+	{
+		id: "claim-delivery-accounting-supported", claim: "投递核算（seq 缺口→missing/delivery_rate）真正可测量且计算正确",
+		mode:          "derived",
+		codeEvidence:  []string{"monolith/loadtest（-delivery-check 连续性跟踪）", "ops 纯单测：缺口/重放/混合 N/A"},
+		defaultStatus: ClaimCodeVerified,
+		notes:         "单测已证明计算逻辑（CODE VERIFIED）；有实验真跑出 delivery_rate/missing_deliveries 非空时升级为 VERIFIED。不以 sent==delivered 冒充投递证明。",
+		derive:        deriveDeliveryAccounting,
+	},
+}
+
+// derivedWinners 依约束化排名目标计算每个 regime 的 best static config（确定性）。
+func derivedRegimeWinners(completed []*Experiment) (map[string]string, []SweepConfigResult) {
+	var rows []SweepConfigResult
+	for _, e := range completed {
+		if e.Regime == "" {
+			continue
+		}
+		rows = append(rows, sweepResultFromExperiment(e))
+	}
+	report := BuildCrossRegimeReport(rows, SensibleRankObjective(), uniqueRegimes(rows), false)
+	winners := map[string]string{}
+	if report != nil {
+		for rg, b := range report.BestPerRegime {
+			winners[rg] = b.Config
+		}
+	}
+	return winners, rows
+}
+
+// deriveRepeatability：存在 >=2 成功 repetition 且聚合稳定。
+func deriveRepeatability(completed []*Experiment) deriveResult {
+	var best *Experiment
+	for _, e := range completed {
+		if e.Aggregate == nil || e.Aggregate.SuccessfulRepetitions < 2 {
+			continue
+		}
+		if best == nil || e.Aggregate.SuccessfulRepetitions > best.Aggregate.SuccessfulRepetitions {
+			best = e
+		}
+	}
+	if best == nil {
+		return deriveResult{status: ClaimUnknown, evidence: []string{"no experiment with >=2 successful repetitions"}}
+	}
+	switch best.Aggregate.Stability {
+	case AggStable, AggModerate:
+		id := best.ID
+		return deriveResult{
+			status:   ClaimVerified,
+			evidence: []string{"experiment " + best.ID + " aggregate stability=" + best.Aggregate.Stability},
+			expID:    &id,
+		}
+	default:
+		id := best.ID
+		return deriveResult{
+			status:   ClaimPartially,
+			evidence: []string{"experiment " + best.ID + " aggregate stability=" + best.Aggregate.Stability + " (high variance)"},
+			expID:    &id,
+		}
+	}
+}
+
+// deriveHotRoomTail：hot-room 实验的 P99 中位数 > low-fanout 实验的 P99 中位数。
+func deriveHotRoomTail(completed []*Experiment) deriveResult {
+	hot := []*Experiment{}
+	lo := []*Experiment{}
+	for _, e := range completed {
+		switch e.Regime {
+		case RegimeHotRoom:
+			hot = append(hot, e)
+		case RegimeLowFanout:
+			lo = append(lo, e)
+		}
+	}
+	hotP99 := regimeTailP99(hot)
+	loP99 := regimeTailP99(lo)
+	if hotP99 == nil || loP99 == nil {
+		return deriveResult{status: ClaimUnknown, evidence: []string{"insufficient hot-room / low-fanout regime data"}}
+	}
+	if *hotP99 > *loP99 {
+		ev := []string{fmt.Sprintf("hot-room P99 median %.0fµs > low-fanout P99 median %.0fµs", *hotP99, *loP99)}
+		var id *string
+		if e := bestRegimeExp(completed, RegimeHotRoom); e != nil {
+			i := e.ID
+			id = &i
+		}
+		return deriveResult{status: ClaimVerified, evidence: ev, expID: id}
+	}
+	return deriveResult{
+		status:   ClaimCodeVerified,
+		evidence: []string{"measured; hot-room P99 did not exceed low-fanout in current data"},
+	}
+}
+
+func regimeTailP99(es []*Experiment) *float64 {
+	var vals []float64
+	for _, e := range es {
+		if e.Aggregate != nil {
+			if m := e.Aggregate.Metrics["p99_latency_us"]; m != nil && m.Measured && m.Median != nil {
+				vals = append(vals, *m.Median)
+			}
+		}
+	}
+	return Median(vals)
+}
+
+func bestRegimeExp(es []*Experiment, regime string) *Experiment {
+	for _, e := range es {
+		if e.Regime == regime && e.Aggregate != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// deriveRegimeDependence / deriveDominance：基于跨 regime best config。
+func deriveRegimeDependence(completed []*Experiment) deriveResult {
+	_, rows := derivedRegimeWinners(completed)
+	report := BuildCrossRegimeReport(rows, SensibleRankObjective(), uniqueRegimes(rows), false)
+	if report == nil || len(report.BestPerRegime) < 2 {
+		return deriveResult{status: ClaimUnknown, evidence: []string{"insufficient cross-regime data (need >=2 regimes with measurable best config)"}}
+	}
+	if report.Domination.StaticOptimumShifts {
+		return deriveResult{status: ClaimVerified, evidence: []string{report.Domination.Conclusion}}
+	}
+	// 同配置占优也是被数据支持的结论（best config 不随 regime 变）。
+	return deriveResult{status: ClaimVerified, evidence: []string{report.Domination.Conclusion}}
+}
+
+func deriveDominance(completed []*Experiment) deriveResult {
+	_, rows := derivedRegimeWinners(completed)
+	report := BuildCrossRegimeReport(rows, SensibleRankObjective(), uniqueRegimes(rows), false)
+	if report == nil || len(report.BestPerRegime) < 2 {
+		return deriveResult{status: ClaimUnknown, evidence: []string{"insufficient cross-regime data"}}
+	}
+	if report.Domination.OneConfigDominates {
+		return deriveResult{status: ClaimVerified, evidence: []string{report.Domination.Conclusion}}
+	}
+	return deriveResult{status: ClaimUnknown, evidence: []string{"no single config dominates all tested regimes"}}
+}
+
+// deriveDeliveryAccounting：有实验真跑出 delivery_rate/missing 时 VERIFIED。
+// 检查顶层代表结果或任一 run 的真实投递测量（run 也可能持有它）。
+func deriveDeliveryAccounting(completed []*Experiment) deriveResult {
+	for _, e := range completed {
+		hit := e.Result.DeliveryRate != nil || e.Result.MissingDeliveries != nil || e.Result.ExpectedDeliveries != nil
+		if !hit {
+			for _, r := range e.Runs {
+				if r.Result.DeliveryRate != nil || r.Result.MissingDeliveries != nil || r.Result.ExpectedDeliveries != nil {
+					hit = true
+					break
+				}
+			}
+		}
+		if hit {
+			id := e.ID
+			return deriveResult{
+				status:   ClaimVerified,
+				evidence: []string{"experiment " + e.ID + " recorded real delivery accounting (delivery_rate=" + fmtNullF(e.Result.DeliveryRate) + ", missing=" + fmtNullI(e.Result.MissingDeliveries) + ")"},
+				expID:    &id,
+			}
+		}
+	}
+	// 没有实验真跑出投递核算 → 保持 CODE VERIFIED（算法被单测证明，但未被基准证明）。
+	return deriveResult{status: ClaimCodeVerified, evidence: []string{"unit-tested delivery accounting; no experiment has recorded real delivery metrics yet"}}
+}
+
+func findExp(es []*Experiment, id string) *Experiment {
+	for _, e := range es {
+		if e.ID == id {
+			return e
+		}
+	}
+	return nil
+}
+
+func fmtNullF(p *float64) string {
+	if p == nil {
+		return "N/A"
+	}
+	return numStr(*p)
+}
+
+func fmtNullI(p *int64) string {
+	if p == nil {
+		return "N/A"
+	}
+	return strconv.FormatInt(*p, 10)
 }
 
 // EvidenceService 把 claimSeeds 与实验存储结合，算出每个 claim 的当前状态。
@@ -198,6 +425,27 @@ func (s *EvidenceService) eval(seed claimSeed, completed []*Experiment, env *Env
 	}
 
 	switch seed.mode {
+	case "derived":
+		if seed.derive == nil {
+			c.Status = ClaimUnknown
+			c.Evidence = []string{"no derivation rule"}
+			return c
+		}
+		d := seed.derive(completed)
+		c.Status = d.status
+		c.Evidence = append([]string{}, d.evidence...)
+		if len(c.Evidence) == 0 {
+			c.Evidence = []string{"no data"}
+		}
+		if d.expID != nil {
+			c.ExperimentID = d.expID
+			c.Evidence = append(c.Evidence, "lab experiment "+*d.expID)
+			if exp := findExp(completed, *d.expID); exp != nil {
+				s.applySupport(&c, exp)
+			}
+		}
+		return c
+
 	case "code":
 		// 先看是否有实验把它升级成 VERIFIED（如 Kafka 真 broker）
 		if len(supporters) > 0 {

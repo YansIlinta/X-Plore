@@ -76,7 +76,7 @@ func (c *comet) handleTraces(w http.ResponseWriter, r *http.Request) {
 func (c *comet) handleStats(w http.ResponseWriter, r *http.Request) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"server_id":      c.id,
 		"conn_count":     c.hub.OnlineCount(), // O(1) 原子计数，替代 256 分片扫描
 		"room_count":     c.hub.RoomCountFast(),
@@ -86,7 +86,14 @@ func (c *comet) handleStats(w http.ResponseWriter, r *http.Request) {
 		"heap_mb":        mem.HeapAlloc / 1024 / 1024,
 		"goroutines":     runtime.NumGoroutine(),
 		"uptime_ms":      time.Since(c.startTime).Milliseconds(),
-	})
+	}
+	// 进程级资源（/proc/self 本进程自身；非 Linux/null）。
+	if pr := sampleProcessResource(); pr != nil {
+		resp["rss_bytes"] = pr.rssBytes
+		resp["cpu_ns"] = pr.cpuNanos
+		resp["gc_pause_ns"] = mem.PauseTotalNs
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (c *comet) handleRooms(w http.ResponseWriter, r *http.Request) {

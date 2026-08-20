@@ -8,15 +8,19 @@ import Rooms from "./pages/Rooms";
 import KafkaPage from "./pages/Kafka";
 import Messages from "./pages/Messages";
 import Experiments from "./pages/Experiments";
+import Sweeps from "./pages/Sweeps";
+import RegimeAnalysis from "./pages/RegimeAnalysis";
 import Compare from "./pages/Compare";
 import Evidence from "./pages/Evidence";
 import EventsPage from "./pages/Events";
 
 // 轻量 hash 路由：页面少，不引入 react-router。
-// 信息结构按产品建议：观测之上的实验层（Experiments / Compare / Evidence）放在最前。
+// 信息结构按产品建议：观测之上的实验层（Experiments / Sweeps / Analysis / Compare / Evidence）放在最前。
 const PAGES: { path: string; label: string; indent?: boolean }[] = [
   { path: "overview", label: "Overview" },
   { path: "experiments", label: "Experiments" },
+  { path: "sweeps", label: "Sweeps" },
+  { path: "analysis/regimes", label: "Regime Analysis" },
   { path: "compare", label: "Compare" },
   { path: "evidence", label: "Evidence" },
   { path: "topology", label: "Topology" },
@@ -62,6 +66,8 @@ export default function App() {
   const effectiveRoute = route === "loadtest" ? "experiments" : route; // 旧 Load Test 入口 → Experiments
   if (effectiveRoute === "overview") page = <Overview />;
   else if (effectiveRoute === "experiments") page = <Experiments />;
+  else if (effectiveRoute === "sweeps") page = <Sweeps />;
+  else if (effectiveRoute === "analysis/regimes") page = <RegimeAnalysis />;
   else if (effectiveRoute === "compare") page = <Compare />;
   else if (effectiveRoute === "evidence") page = <Evidence />;
   else if (effectiveRoute === "topology") page = <Topology />;

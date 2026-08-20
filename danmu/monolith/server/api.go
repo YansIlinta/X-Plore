@@ -165,7 +165,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"server_id":  a.hub.serverID,
 		"conn_count": a.hub.GetConnCount(),
 		"room_count": a.hub.GetRoomCount(),
@@ -174,7 +174,14 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"goroutines": runtime.NumGoroutine(),
 		"gc_count":   mem.NumGC,
 		"uptime_ms":  time.Since(a.startTime).Milliseconds(),
-	})
+	}
+	// 进程级资源（读 /proc/self，仅本进程自身；非 Linux 或缺权限 → null）。
+	if pr := sampleProcessResource(); pr != nil {
+		resp["rss_bytes"] = pr.rssBytes
+		resp["cpu_ns"] = pr.cpuNanos
+		resp["gc_pause_ns"] = mem.PauseTotalNs
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GET /api/v1/rooms?page=&limit= - 房间列表

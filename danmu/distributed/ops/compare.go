@@ -31,6 +31,8 @@ var compareMetrics = []compareMetricSpec{
 	{Key: "messages_sent", Label: "Messages sent", Unit: "msgs", Group: "throughput", Direction: "", Floor: 1},
 	{Key: "messages_received", Label: "Messages received", Unit: "msgs", Group: "throughput", Direction: "higher_better", Floor: 1},
 	{Key: "drops", Label: "Drops", Unit: "msgs", Group: "reliability", Direction: "lower_better", Floor: 1},
+	{Key: "missing_deliveries", Label: "Missing deliveries", Unit: "msgs", Group: "reliability", Direction: "lower_better", Floor: 1},
+	{Key: "delivery_rate", Label: "Delivery rate", Unit: "rate", Group: "reliability", Direction: "higher_better", Floor: 0.001},
 	{Key: "write_errors", Label: "Write errors", Unit: "", Group: "reliability", Direction: "lower_better", Floor: 1},
 	{Key: "read_errors", Label: "Read errors", Unit: "", Group: "reliability", Direction: "lower_better", Floor: 1},
 	{Key: "p50_latency_us", Label: "P50 latency", Unit: "µs", Group: "latency", Direction: "lower_better", Floor: 100},
@@ -91,42 +93,7 @@ func resultMetric(e *Experiment, key string) *float64 {
 	if e == nil {
 		return nil
 	}
-	r := e.Result
-	switch key {
-	case "connections_requested":
-		return i2f(r.ConnectionsRequested)
-	case "connections_established":
-		return i2f(r.ConnectionsEstablished)
-	case "connections_failed":
-		return i2f(r.ConnectionsFailed)
-	case "messages_sent":
-		return i2f(r.MessagesSent)
-	case "messages_received":
-		return i2f(r.MessagesReceived)
-	case "write_errors":
-		return i2f(r.WriteErrors)
-	case "read_errors":
-		return i2f(r.ReadErrors)
-	case "drops":
-		return i2f(r.Drops)
-	case "p50_latency_us":
-		return i2f(r.P50LatencyUS)
-	case "p90_latency_us":
-		return i2f(r.P90LatencyUS)
-	case "p99_latency_us":
-		return i2f(r.P99LatencyUS)
-	case "max_latency_us":
-		return i2f(r.MaxLatencyUS)
-	case "send_rate":
-		return r.SendRate
-	case "receive_rate":
-		return r.ReceiveRate
-	case "kafka_lag":
-		return i2f(r.KafkaLag)
-	case "trace_completion_rate":
-		return r.TraceCompletion
-	}
-	return nil
+	return resultMetricFrom(&e.Result, key)
 }
 
 // CompareExperiments 计算左右两个实验的逐指标对比。

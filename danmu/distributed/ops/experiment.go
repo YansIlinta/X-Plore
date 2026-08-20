@@ -13,18 +13,20 @@ import (
 // 数据真实性约定（与 Collector 一致）：未测量的字段必须为 null（前端渲染 N/A），
 // 绝不把"没测"伪装成"测得 0"。0 表示真实测量值为零，null 表示没有测量。
 
-// 实验状态机：
+// 实验状态机（Phase 1.5：多跑多 Run）：
 //
-//	created ──start──► running ──(完成)──► completed
-//	                          ├─(出错)──► failed
-//	                          └─(stop)──► stopped
-//	completed / failed / stopped ──start──► running（重新开始同一实验会覆盖其历史结果）
+//	created ──start──► running ──(全部成功)──► completed
+//	                          ├─(部分成功)──► partial
+//	                          ├─(全部失败)──► failed
+//	                          └─(用户 stop)──► stopped
+//	completed / partial / failed / stopped ──start──► running（重新执行同一规格）
 //
-// 任意时刻全局最多只有一个 running（loadtest 子进程是单例，见 loadtestManager）。
+// 任意时刻全局最多只有一个 run 在跑（loadtest 子进程是单例，见 loadtestManager）。
 const (
 	ExpStatusCreated   = "created"
 	ExpStatusRunning   = "running"
 	ExpStatusCompleted = "completed"
+	ExpStatusPartial   = "partial"
 	ExpStatusFailed    = "failed"
 	ExpStatusStopped   = "stopped"
 )
@@ -41,19 +43,35 @@ var ExpStatuses = []string{
 	ExpStatusCreated,
 	ExpStatusRunning,
 	ExpStatusCompleted,
+	ExpStatusPartial,
 	ExpStatusFailed,
 	ExpStatusStopped,
 }
 
 // WorkloadConfig 只包含当前 loadtest 真实支持的参数。
-// 它不臆想 churn/packet-loss/slow-client/Zipf 等不存在的能力（见 loadtest/main.go flags）。
 // Target 是逗号分隔的 ws:// 或 wss:// 地址（与 loadtest --server 语义一致）。
+// Distribution / ZipfS / Seed 是 Phase 1.5 新增的房间热度分布参数：
+//   - Distribution: uniform | hot_room | zipf
+//   - ZipfS:        zipf 分布的 s 参数（s>1 越集中）
+//   - Seed:         deterministic random seed（相同 seed 产出相同分配）
 type WorkloadConfig struct {
 	Connections int     `json:"connections"`
 	Rooms       int     `json:"rooms"`
 	MessageRate float64 `json:"message_rate"` // 每连接每秒消息数
-	Duration    string  `json:"duration"`     // Go duration 字符串，如 "60s"
+	Duration    string  `json:"duration"`     // Go duration 字符串，如 "60s"（legacy：也用作测量窗）
 	Target      string  `json:"target"`       // 如 "ws://localhost:8081" 或 "ws://a:8080,ws://b:8080"
+
+	Distribution string  `json:"distribution,omitempty"` // uniform | hot_room | zipf
+	ZipfS        float64 `json:"zipf_s,omitempty"`       // zipf s 参数
+	Seed         int64   `json:"seed,omitempty"`         // deterministic seed
+}
+
+// DistributionKind 返回已归一化的分布名（空 → uniform）。
+func (w WorkloadConfig) DistributionKind() string {
+	if w.Distribution == "" {
+		return DistUniform
+	}
+	return w.Distribution
 }
 
 // Validate 校验 workload 是否可被 loadtest 执行。返回哨兵原因（供 API 422）。
@@ -82,6 +100,17 @@ func (w WorkloadConfig) Validate() error {
 			return fmt.Errorf("target %q must start with ws:// or wss://", u)
 		}
 	}
+	switch w.DistributionKind() {
+	case DistUniform, DistHotRoom, DistZipf:
+	default:
+		return fmt.Errorf("distribution must be uniform, hot_room or zipf, got %q", w.Distribution)
+	}
+	if w.DistributionKind() == DistZipf && (w.ZipfS <= 0 || w.ZipfS > 5) {
+		return fmt.Errorf("zipf_s must be in (0, 5], got %v", w.ZipfS)
+	}
+	if w.Rooms < 2 && w.DistributionKind() == DistHotRoom {
+		return fmt.Errorf("hot_room distribution requires at least 2 rooms (got %d)", w.Rooms)
+	}
 	return nil
 }
 
@@ -105,9 +134,15 @@ type ExperimentResult struct {
 
 	// 可靠性层
 	// drops 当前 loadtest 不测量（dropCount 从未递增），恒为 null，见 EXPERIMENTS.md 已知限制。
-	Drops       *int64 `json:"drops"`
-	WriteErrors *int64 `json:"write_errors"` // 由 loadtest 每帧快照累计计数聚合
-	ReadErrors  *int64 `json:"read_errors"`
+	// Phase 1.5：当 loadtest 以 -delivery-check 模式运行且能可靠计算投递缺口时，
+	// MissingDeliveries / ExpectedDeliveries / DeliveryRate 会被真实填写，
+	// Drops 反映为 MissingDeliveries（真实的投递缺口），否则保持 null。
+	Drops              *int64   `json:"drops"`
+	MissingDeliveries  *int64   `json:"missing_deliveries,omitempty"`  // 观测到的按连接投递缺口（seq 跳跃求和）
+	ExpectedDeliveries *int64   `json:"expected_deliveries,omitempty"` // 应投递的按连接投递次数 = observed+missing
+	DeliveryRate       *float64 `json:"delivery_rate,omitempty"`       // observed/expected（0~1）；未测 → null
+	WriteErrors        *int64   `json:"write_errors"`                  // 由 loadtest 每帧快照累计计数聚合
+	ReadErrors         *int64   `json:"read_errors"`
 
 	// 延迟层（微秒；loadtest HDR Histogram）
 	P50LatencyUS *int64 `json:"p50_latency_us"`
@@ -162,19 +197,43 @@ type EnvironmentSnapshot struct {
 
 // Experiment 是一个持久化的实验记录。ID 由 Manager 生成，只允许
 // [A-Za-z0-9_-]，不允许任何路径分隔符（防目录穿越）。
+//
+// Phase 1.5：Experiment 从一个单 Run 提升为"可重复执行的实验容器"。
+//   - Spec        —— 不可变的实验规格（执行开始后不再改动）
+//   - SpecHash    —— canonical hash，判断两个实验是否同配置
+//   - Repetitions —— 期望的重复次数；老文件（0）视为 1
+//   - Runs        —— 每次实际执行的 Run 记录（顺序追加）
+//   - Aggregate   —— 对成功 repetitions 的统计聚合（成功 reps≥1 才有）
+//   - Result      —— 兼容旧层（Compare/Evidence）的"代表结果"：
+//     老实验 = 那次运行的原始结果；新实验 = Aggregate 的代表值
+//     （各 latency 用 median、throughput 用 mean、errors 取 max）。
 type Experiment struct {
 	ID           string               `json:"id"`
 	Name         string               `json:"name"`
 	Architecture string               `json:"architecture"`
-	Preset       string               `json:"preset"` // low-fanout | hot-room | custom
+	Preset       string               `json:"preset"` // low-fanout | hot-room | custom（legacy；新实验可空）
 	Status       string               `json:"status"`
 	Workload     WorkloadConfig       `json:"workload"`
 	CreatedAt    time.Time            `json:"created_at"`
 	StartedAt    *time.Time           `json:"started_at"`  // 未开始 → null
 	FinishedAt   *time.Time           `json:"finished_at"` // 未结束 → null
-	Environment  *EnvironmentSnapshot `json:"environment"` // 开始时采集；未开始 → null
+	Environment  *EnvironmentSnapshot `json:"environment"` // 开始第一个 run 时采集；未开始 → null
 	Result       ExperimentResult     `json:"result"`
 	Error        string               `json:"error,omitempty"`
+
+	// --- Phase 1.5 新增字段（全部向后兼容；老文件自动迁移补齐） ---
+	SchemaVersion int                  `json:"schema_version,omitempty"` // 老文件 0
+	Regime        string               `json:"regime,omitempty"`         // workload regime 标签
+	ConfigLabel   string               `json:"config_label,omitempty"`   // system config 标签
+	Warmup        string               `json:"warmup,omitempty"`         // Go duration；"" = 无 warm-up
+	Duration      string               `json:"duration,omitempty"`       // 测量窗口；老文件回退到 Workload.Duration
+	Repetitions   int                  `json:"repetitions,omitempty"`    // 老文件 0 → 视为 1
+	Spec          ExperimentSpec       `json:"spec,omitempty"`
+	SpecHash      string               `json:"spec_hash,omitempty"`
+	SystemConfig  SystemConfig         `json:"system_config,omitempty"`
+	SweepID       string               `json:"sweep_id,omitempty"` // 属于哪个 sweep（无则空）
+	Runs          []*ExperimentRun     `json:"runs,omitempty"`
+	Aggregate     *ExperimentAggregate `json:"aggregate,omitempty"`
 }
 
 // CanStart 判断一个实验是否允许被 start。
@@ -182,7 +241,7 @@ func (e *Experiment) CanStart() error {
 	switch e.Status {
 	case ExpStatusRunning:
 		return fmt.Errorf("experiment %s is already running", e.ID)
-	case ExpStatusCreated, ExpStatusCompleted, ExpStatusFailed, ExpStatusStopped:
+	case ExpStatusCreated, ExpStatusCompleted, ExpStatusFailed, ExpStatusStopped, ExpStatusPartial:
 		return nil
 	}
 	return fmt.Errorf("experiment %s has unknown status %q", e.ID, e.Status)

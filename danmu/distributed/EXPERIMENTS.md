@@ -152,3 +152,85 @@ loadtest 与 server 同机（共 2 vCPU → 延迟偏保守）。repo 主链 com
   compose），Ops 只旁路观测，不会替你拉起服务。
 - 实验层不引入 PostgreSQL/ClickHouse 等新存储；持久化就是 `<data-dir>/experiments/*.json`。
 - 同机压测（loadtest 与 server 共享 CPU）测得的延迟偏低可信度——README 已提示压测机宜分机。
+
+---
+
+# Phase 1.5 — Reproducible Benchmark & Design-Space Lab
+
+本阶段把 `Single Run → Result → Compare → Evidence` 升级为
+`Experiment Spec → Repeated Runs → Statistical Aggregate → Parameter Sweep →
+Workload Regime Comparison → Reproducible Evidence`。配套文档：
+[BENCHMARKING.md](./BENCHMARKING.md)（测量/统计语义）、[SWEEPS.md](./SWEEPS.md)（扫描/跨 regime/Go-No-Go）、
+[EVIDENCE.md](./EVIDENCE.md)（新 claims）。
+
+## 11. 领域模型
+
+| 概念 | 说明 | 存储 |
+|---|---|---|
+| Run | 一次真实执行（独立 environment/resource/result/error） | experiment 内 `runs[]` |
+| Experiment | spec 不可变 + Repetitions + 顺序执行的 Runs + Aggregate | `<data-dir>/experiments/<id>.json` |
+| Sweep | 多个 Experiment（Cartesian product: configs × regimes × repetitions） | `<data-dir>/sweeps/<id>.json` |
+
+`spec_hash` = SHA-256(canonical spec)：相同 spec ⇒ 相同 hash；workload/system 任意变化 ⇒ hash 变化。
+`schema_version` 从 Phase 1 老文件 0 迁移到 1，老实验（无 repetitions）视作 repetitions=1。
+
+## 12. 状态机（Phase 1.5）
+
+```text
+created ──start──► running ──(全部成功)──► completed
+                          ├─(部分成功)──► partial          # 4/5 成功不许伪装全成功
+                          ├─(全部失败)──► failed
+                          └─(用户 stop)──► stopped
+partial/failed/stopped ──start──► running（恢复：跳过已完成 rep，重试其余）
+```
+
+## 13. API（新增）
+
+```text
+GET  /api/regimes                             4 个 workload regime 默认模板 + 排名目标
+POST /api/experiments                         新增 regime/warmup/duration/repetitions/system_config
+GET  /api/experiments/{id}                    含 spec/spec_hash/runs/aggregate（向后兼容）
+POST /api/sweeps  ·  GET /api/sweeps  ·  /api/sweeps/{id}  ·  {id}/start  ·  {id}/stop  ·  {id}/report
+GET  /api/regime-analysis                      基于已完成实验的确定性 cross-regime 视图
+```
+
+`schema_version` 落盘；老文件读时自动迁移（不写回污染历史）。
+
+## 14. 本地复现（Phase 1.5）
+
+```bash
+# 构建
+cd danmu/monolith && go build -o bin/loadtest ./loadtest/ && go build -o bin/server ./server/
+cd ../distributed && go build -o bin/ops ./cmd/ops/
+
+# 1) 一个受控 monolith server 作为独立目标（也可让 ops 为系统参数 sweep 自动拉起）
+DANMU_AUTH_TOKEN=danmu-secret-token ./monolith/bin/server -addr=127.0.0.1:18081 -mq=none -pprof=127.0.0.1:0
+
+# 2) Ops（含 sweep/server 受控进程）
+DANMU_AUTH_TOKEN=danmu-secret-token ./bin/ops -addr=:17900 -etcd=localhost:2379 -kafka="" \
+  -loadtest-bin=../monolith/bin/loadtest -server-bin=../monolith/bin/server \
+  -data-dir=/tmp/xplore-lab/data -repo-dir=/home/ubuntu/X-Plore
+
+# 3) 带 regime / repetitions 的实验
+curl -s -X POST localhost:17900/api/experiments -H 'Content-Type: application/json' -d '{
+  "name":"repro","regime":"hot-room","architecture":"monolith",
+  "warmup":"2s","duration":"8s","repetitions":5,"workload":{"target":"ws://127.0.0.1:18081"}}'
+# 4) system-config sweep（batch_size × batch_timeout × 3 regimes × 5 reps）
+curl -s -X POST localhost:17900/api/sweeps -H 'Content-Type: application/json' -d '{
+  "name":"acceptance","regimes":["low-fanout","hot-room","skewed-hot-room"],
+  "params":[{"name":"batch_size","values":["2000","5000","10000"]},
+            {"name":"batch_timeout","values":["5ms","20ms"]}],
+  "repetitions":5,"warmup":"2s","duration":"8s","target":"ws://127.0.0.1:18181"}'
+```
+
+## 15. Phase 1.5 acceptance（真实运行，见最终交付报告）
+
+- 3 个 workload regime：Low Fanout / Hot Room / Skewed Hot Room
+- ≥3 个 system configs（真实可调的 startup 参数）
+- 每个 5 repetitions —— 结构不可缩水；规模可按本机 2 vCPU 调小
+- 交付物：每个 Experiment 的方差/CV、稳定性结论、每 regime best static config、
+  cross-regime 是否 shift、Adaptive-Control Gate（GO / NOT YET JUSTIFIED）+ 每条条件的证据。
+
+> 最终原则：**不超过实验证据的范围下结论**。写 "best observed configuration"，
+> 不写 "optimal"；写 "observed static optimum varies across tested regimes"，
+> 不写 "adaptive control is necessary"。

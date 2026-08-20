@@ -8,24 +8,39 @@ import (
 	"time"
 )
 
-const (
-	batchSize    = 2000
-	batchTimeout = 20 * time.Millisecond
+// 默认批量参数（可被 -batch-size / -batch-timeout / -workers 覆盖，见 main.go）。
+// 这些是 startup config：运行时不可改，改变它必须重启 server 进程。
+var (
+	defaultBatchSize    = 2000
+	defaultBatchTimeout = 20 * time.Millisecond
 )
 
 // WorkerPool 固定大小的 worker 池，消费 msgQueue，批量聚合后广播
-// worker 数量 = runtime.NumCPU() * 2
+// worker 数量默认 = runtime.NumCPU() * 2（可被 -workers 覆盖）。
 type WorkerPool struct {
-	hub     *Hub
-	workers int
-	wg      sync.WaitGroup
+	hub          *Hub
+	workers      int
+	batchSize    int
+	batchTimeout time.Duration
+	wg           sync.WaitGroup
 }
 
 func NewWorkerPool(hub *Hub) *WorkerPool {
-	return &WorkerPool{
-		hub:     hub,
-		workers: runtime.NumCPU() * 2,
+	return NewWorkerPoolCfg(hub, runtime.NumCPU()*2, defaultBatchSize, defaultBatchTimeout)
+}
+
+// NewWorkerPoolCfg 以显式参数构造 WorkerPool（供 -batch-size/-batch-timeout/-workers 使用）。
+func NewWorkerPoolCfg(hub *Hub, workers, batchSize int, batchTimeout time.Duration) *WorkerPool {
+	if workers <= 0 {
+		workers = runtime.NumCPU() * 2
 	}
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	if batchTimeout <= 0 {
+		batchTimeout = defaultBatchTimeout
+	}
+	return &WorkerPool{hub: hub, workers: workers, batchSize: batchSize, batchTimeout: batchTimeout}
 }
 
 // Start 启动所有 worker goroutine
@@ -58,13 +73,13 @@ func (wp *WorkerPool) Wait() {
 }
 
 // worker 单个 worker goroutine
-// 批量聚合策略：攒满 batchSize 条或每 batchTimeout 触发一次
+// 批量聚合策略：攒满 wp.batchSize 条或每 wp.batchTimeout 触发一次
 // 聚合后按房间分组广播，减少 syscall
 func (wp *WorkerPool) worker(id int) {
 	defer wp.wg.Done()
 
-	batch := make([]*Message, 0, batchSize)
-	timer := time.NewTimer(batchTimeout)
+	batch := make([]*Message, 0, wp.batchSize)
+	timer := time.NewTimer(wp.batchTimeout)
 	defer timer.Stop()
 
 	flush := func() {
@@ -149,7 +164,7 @@ func (wp *WorkerPool) worker(id int) {
 				select {
 				case msg := <-wp.hub.msgQueue:
 					batch = append(batch, msg)
-					if len(batch) >= batchSize {
+					if len(batch) >= wp.batchSize {
 						flush()
 					}
 				default:
@@ -160,7 +175,7 @@ func (wp *WorkerPool) worker(id int) {
 
 		case msg := <-wp.hub.msgQueue:
 			batch = append(batch, msg)
-			if len(batch) >= batchSize {
+			if len(batch) >= wp.batchSize {
 				flush()
 				if !timer.Stop() {
 					select {
@@ -168,12 +183,12 @@ func (wp *WorkerPool) worker(id int) {
 					default:
 					}
 				}
-				timer.Reset(batchTimeout)
+				timer.Reset(wp.batchTimeout)
 			}
 
 		case <-timer.C:
 			flush()
-			timer.Reset(batchTimeout)
+			timer.Reset(wp.batchTimeout)
 		}
 	}
 }

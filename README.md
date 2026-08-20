@@ -69,6 +69,7 @@ cd danmu/monolith && go test -race ./server/
 | Ops Console 聚合与健康判定 | ✅ 实测 |
 | standalone comet 压测（P50 ~0.4ms @ 200 连接） | ✅ 实测 |
 | **Realtime Systems Lab（实验/对比/证据）** | ✅ 实测（200c/100r 与 400c/10r 各一次，见 [EXPERIMENTS.md §9](./danmu/distributed/EXPERIMENTS.md)） |
+| **Realtime Systems Lab Phase 1.5（重复基准 / 参数扫描 / 跨 regime 分析 / Adaptive-Go-No-Go）** | ✅ 实测（3 regimes × 3 configs × 5 reps acceptance，见 [EXPERIMENTS.md §15](./danmu/distributed/EXPERIMENTS.md)） |
 | Kafka 段（logic→Kafka→job 扇出）、Redis 跨机广播、ClickHouse 落库/历史 | ⏳ 需中间件环境（compose / run-goim-local.sh） |
 
 > 说明：©上面 "✅ 实测" 是不同日期、不同机器上的记录；每一行都非「当前版本自动证明」。
@@ -83,5 +84,7 @@ cd danmu/monolith && go test -race ./server/
 | [danmu/monolith/README.md](./danmu/monolith/README.md) | 单体版部署、压测剧本、系统调优清单、接口文档 |
 | [danmu/monolith/REVIEW.md](./danmu/monolith/REVIEW.md) | 单体版代码审查报告（H/M/L 逐条问题与修复） |
 | [danmu/distributed/DESIGN.md](./danmu/distributed/DESIGN.md) | goim 式微服务化设计：Comet/Logic/Job 分层与 etcd |
-| [danmu/distributed/EXPERIMENTS.md](./danmu/distributed/EXPERIMENTS.md) | Realtime Systems Lab：实验模型 / API / 复现命令 / 实测记录 |
-| [danmu/distributed/EVIDENCE.md](./danmu/distributed/EVIDENCE.md) | Evidence/Claims 语义：VERIFIED / PARTIAL / CODE / TARGET / UNKNOWN |
+| [danmu/distributed/EXPERIMENTS.md](./danmu/distributed/EXPERIMENTS.md) | Realtime Systems Lab：实验模型 / API / 复现命令 / Phase 1.5 实测记录 |
+| [danmu/distributed/BENCHMARKING.md](./danmu/distributed/BENCHMARKING.md) | 基准正确性语义：Run/Experiment/Sweep、warm-up/测量窗、统计、投递核算 |
+| [danmu/distributed/SWEEPS.md](./danmu/distributed/SWEEPS.md) | 参数扫描 / 跨 workload regime 分析 / Adaptive-Control Go-No-Go |
+| [danmu/distributed/EVIDENCE.md](./danmu/distributed/EVIDENCE.md) | Evidence/Claims 语义：VERIFIED / PARTIAL / CODE / TARGET / UNKNOWN + Phase 1.5 claims |

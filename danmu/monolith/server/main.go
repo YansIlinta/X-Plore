@@ -35,6 +35,9 @@ func main() {
 	histTTL := flag.Duration("hist-ttl", 5*time.Minute, "热历史 TTL，超时未写入视为新会话")
 	idemTTL := flag.Duration("idem-ttl", 30*time.Second, "客户端 msg_id 幂等窗口，窗口内重复 msg_id 只广播一次")
 	wordbankFile := flag.String("wordbank-file", "", "房间敏感词库 JSON 持久化文件（空=仅内存）")
+	batchSizeFlag := flag.Int("batch-size", 0, "广播批量聚合的条数（0=默认 2000）")
+	batchTimeoutFlag := flag.Duration("batch-timeout", 0, "广播批量聚合的超时（0=默认 20ms）")
+	workersFlag := flag.Int("workers", 0, "worker 池大小（0=默认 NumCPU()*2）")
 	flag.Parse()
 
 	// 在启动任何连接前设置会话 TTL（运行期只读）
@@ -90,7 +93,12 @@ func main() {
 	}
 
 	// Worker Pool
-	wp := NewWorkerPool(hub)
+	var wp *WorkerPool
+	if *batchSizeFlag > 0 || *batchTimeoutFlag > 0 || *workersFlag > 0 {
+		wp = NewWorkerPoolCfg(hub, *workersFlag, *batchSizeFlag, *batchTimeoutFlag)
+	} else {
+		wp = NewWorkerPool(hub)
+	}
 	wp.Start()
 
 	// API

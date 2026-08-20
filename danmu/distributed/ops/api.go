@@ -10,14 +10,23 @@ import (
 )
 
 // API 是 Ops Console 的 HTTP 面。GET 全部只读，读取 Collector 的最新快照；
-// 仅实验/压测的 start/stop 是 ACTION（启停 loadtest 子进程）。
-// 状态机的唯一主人是 ExperimentManager；旧的 /api/loadtest/* 只是它的兼容入口。
+// 仅实验/压测/sweep 的 start/stop 是 ACTION（启停 loadtest 子进程）。
+// 状态机的唯一主人是 ExperimentManager；SweepManager 只编排顺序执行。
 type API struct {
-	col *Collector
-	em  *ExperimentManager
+	col      *Collector
+	em       *ExperimentManager
+	sweepMgr *SweepManager
 }
 
-func NewAPI(col *Collector, em *ExperimentManager) *API { return &API{col: col, em: em} }
+func NewAPI(col *Collector, em *ExperimentManager) *API {
+	return &API{col: col, em: em}
+}
+
+// WithSweeps 附加 sweep 管理器（无则 sweep 端点不可用）。
+func (a *API) WithSweeps(sm *SweepManager) *API {
+	a.sweepMgr = sm
+	return a
+}
 
 // Handler 返回路由 mux。
 func (a *API) Handler() http.Handler {
@@ -32,6 +41,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/rooms/", a.handleRoomDetail)
 	// Realtime Systems Lab（实验/对比/证据/预设）
 	a.registerExperimentRoutes(mux)
+	// Phase 1.5：Sweep / Regime
+	a.registerSweepRoutes(mux)
 	// 旧 loadtest 端点保留为 ExperimentManager 的兼容入口
 	mux.HandleFunc("/api/loadtest/status", a.handleLoadtestStatus)
 	mux.HandleFunc("/api/loadtest/start", a.handleLoadtestStart)

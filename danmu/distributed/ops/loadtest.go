@@ -98,6 +98,18 @@ func (m *loadtestManager) Start(params map[string]any) error {
 	if token == "" {
 		token = m.token
 	}
+	warmup, _ := params["warmup"].(string)
+	ramp, _ := params["ramp"].(string)
+	if ramp == "" {
+		ramp = "2s"
+	}
+	dist, _ := params["dist"].(string)
+	if dist == "" {
+		dist = "uniform"
+	}
+	zipfS := floatOr(params["zipf_s"], 0)
+	seed := int64(numOr(params["seed"], 1))
+	deliveryCheck, _ := params["delivery_check"].(bool)
 	// 参数上限保护：避免误配打爆目标（压测目标是生产集群时尤其重要）
 	conns = clampInt(conns, 1, 100000)
 	rooms = clampInt(rooms, 1, 10000)
@@ -105,7 +117,7 @@ func (m *loadtestManager) Start(params map[string]any) error {
 
 	reportPath := filepath.Join(os.TempDir(), fmt.Sprintf("danmu-loadtest-%d.json", time.Now().Unix()))
 	ctx, cancel := context.WithCancel(m.ctx)
-	cmd := exec.CommandContext(ctx, m.bin,
+	args := []string{
 		"-server", server,
 		"-conns", strconv.Itoa(conns),
 		"-rooms", strconv.Itoa(rooms),
@@ -113,7 +125,20 @@ func (m *loadtestManager) Start(params map[string]any) error {
 		"-duration", duration,
 		"-token", token,
 		"-output-json", reportPath,
-	)
+		"-dist", dist,
+		"-seed", strconv.FormatInt(seed, 10),
+		"-ramp", ramp,
+	}
+	if warmup != "" {
+		args = append(args, "-warmup", warmup)
+	}
+	if zipfS > 0 {
+		args = append(args, "-zipf-s", strconv.FormatFloat(zipfS, 'f', -1, 64))
+	}
+	if deliveryCheck {
+		args = append(args, "-delivery-check")
+	}
+	cmd := exec.CommandContext(ctx, m.bin, args...)
 
 	var out bytes.Buffer
 	cmd.Stdout = &lineScanWriter{onLine: func(line string) {
@@ -131,7 +156,10 @@ func (m *loadtestManager) Start(params map[string]any) error {
 	}
 
 	m.running = true
-	m.params = map[string]any{"server": server, "conns": conns, "rooms": rooms, "rate": rate, "duration": duration}
+	m.params = map[string]any{
+		"server": server, "conns": conns, "rooms": rooms, "rate": rate, "duration": duration,
+		"warmup": warmup, "dist": dist, "seed": seed, "delivery_check": deliveryCheck,
+	}
 	m.startedAt = time.Now()
 	m.latest = nil
 	m.report = nil

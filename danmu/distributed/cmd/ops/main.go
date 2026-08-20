@@ -28,9 +28,11 @@ func main() {
 	poll := flag.Duration("poll", 2*time.Second, "采集周期")
 	mock := flag.Bool("mock", false, "mock 模式：喂演示数据（响应带 mock:true，UI 显著标记）")
 	loadtestBin := flag.String("loadtest-bin", "bin/loadtest", "loadtest 二进制路径（../monolith 构建）；不存在则压测功能不可用")
-	dataDir := flag.String("data-dir", "./data", "Realtime Systems Lab 数据目录（experiments/ 子目录存 JSON 记录）")
+	serverBin := flag.String("server-bin", "bin/server", "monolith server 二进制路径（system-config sweep 受控进程用）；不存在则该能力不可用")
+	dataDir := flag.String("data-dir", "./data", "Realtime Systems Lab 数据目录（experiments/ 与 sweeps/ 子目录存 JSON 记录）")
 	repoDir := flag.String("repo-dir", "", "Git 仓库目录（采集实验的 commit/dirty 元数据；空=跳过 git 信息）")
 	historyLimit := flag.Int("experiment-history", 200, "实验历史有界加载条数")
+	sweepLimit := flag.Int("sweep-history", 100, "sweep 历史有界加载条数")
 	flag.Parse()
 
 	if *token == "" {
@@ -68,9 +70,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("[ops] experiment store init failed: %v", err)
 	}
-	em := ops.NewExperimentManager(store, lt, *repoDir, col)
+	sweepStore, err := ops.NewSweepStore(*dataDir, *sweepLimit)
+	if err != nil {
+		log.Fatalf("[ops] sweep store init failed: %v", err)
+	}
+	// 受控 server 进程管理器（system-config sweep 用；不可用不影响其余功能）。
+	spm := ops.NewServerProcessManager(*serverBin, *token, ctx)
+	if !spm.Available() {
+		log.Printf("[ops] controlled server binary unavailable (%s): system-config sweeps disabled", *serverBin)
+	}
+	em := ops.NewExperimentManagerFull(store, lt, *repoDir, col, spm, *token)
+	sm := ops.NewSweepManager(sweepStore, em)
 
-	api := ops.NewAPI(col, em)
+	api := ops.NewAPI(col, em).WithSweeps(sm)
 
 	// 路由：/api/* 给观测 API，其余走内嵌前端（SPA fallback：未知路径回 index.html）。
 	mux := http.NewServeMux()

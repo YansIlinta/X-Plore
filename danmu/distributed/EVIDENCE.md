@@ -76,3 +76,29 @@ workload：connections / rooms / message_rate / duration / target
 
 任何字段拿不到就 `null`，绝不编。Git 元数据由 `-repo-dir` 指向仓库目录采集；
 `git` 不可用或目录不对时该项为 null（不影响实验运行）。
+
+## 5. Phase 1.5：可重复基准 / 配置 / 跨 workload regime 的新 claims
+
+状态**全部由实验存储数据推导**，绝不硬编码成 VERIFIED：
+
+| Claim | 推导规则（`evidence.go` derived 模式） | 默认态 | 何时 VERIFIED |
+|---|---|---|---|
+| 同一 workload 重复运行结果可复现（claim-repeatability-observed） | 存在 ≥2 成功 repetition 的实验且聚合稳定（p90 CV < 0.30） | UNKNOWN | 有稳定聚合 |
+| Hot Room 比 Low Fanout 有更高尾部延迟（claim-hot-room-higher-tail-latency） | hot-room 实验的 P99 **中位数 >** low-fanout 实验的 P99 中位数 | UNKNOWN | 数据支持该关系 |
+| 最优 static config 随 workload regime 改变（claim-static-optimum-shifts） | 跨 regime 约束化排名：不同 regime 的 best config 不同 | UNKNOWN | 数据支撑（相反结论也有数据则同样 VERIFIED，但结论如实标注） |
+| 存在对所有测试 regime 始终占优的 static config（claim-one-config-dominates-all） | 同一 config 在所有 regime 都是 best | UNKNOWN | 数据支撑 |
+| 投递核算真正可测量（claim-delivery-accounting-supported） | 有实验真跑出 delivery_rate / missing_deliveries 非空 | CODE VERIFIED | 有真实 run 数据 |
+
+> 关键区别：Phase 1 的 metric/goal 型 claim 认的是"绝对值 ≥ 阈值"；
+> Phase 1.5 的 derived 型 claim 认的是**跨 run / 跨配置 / 跨 workload 的相对关系**。
+> 两者都只认实验存储，都不读文档、不碰 LLM。
+> 投递核算 claim 尤其严格：算法有单测证明是 CODE VERIFIED，
+> 只有某个实验在基准里真跑出缺口（missing > 0 或 delivery_rate < 1）才升级 VERIFIED——
+> 绝不拿 "sent == delivered" 当作投递证明。
+
+## 6. 为什么这些 claim 不会自动变 VERIFIED
+
+- 只有一个 5 repetition 的实验且 CV 很大（>0.30）→ repeatability 只会是 PARTIALLY。
+- 没有 hot-room 实验、或 hot-room 的 P99 中位数没超过 low-fanout → 那个 claim 保持 UNKNOWN。
+- 只有 1 个 regime → static-optimum-shifts 无足够数据 → UNKNOWN。
+- 实验一开始就不带 workload regime 元数据（Phase 1 legacy）→ 不参与跨 regime 推导。

@@ -92,6 +92,7 @@ func (s *experimentStore) Save(e *Experiment) error {
 }
 
 // Load 读取单个实验。损坏 → 返回错误（调用方决定如何呈现，不会因此崩溃）。
+// 加载后执行 Migration（Phase 1.5 老文件 → 补齐默认语义）。
 func (s *experimentStore) Load(id string) (*Experiment, error) {
 	finalPath, err := s.path(id)
 	if err != nil {
@@ -105,7 +106,63 @@ func (s *experimentStore) Load(id string) (*Experiment, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return nil, fmt.Errorf("experiment %s is corrupted (%v); file kept for inspection", id, err)
 	}
+	MigrateExperiment(&e)
 	return &e, nil
+}
+
+// MigrateExperiment 把 Phase 1 老文件提升到当前 schema（幂等）：
+//
+//   - schema_version 0 → 当前版本（不落盘，读时视图；Save 时才会写回）
+//   - 无 repetitions（0）→ 视为 1（老实验确实只跑了一次）
+//   - 无 duration → 回退 Workload.Duration
+//   - 无 runs 但 result 存在 → 合成一个 completed Run 视图（保持 Compare/Evidence 可用）
+//   - Spec 为空 → 从顶层字段重建并计算 SpecHash（不落盘）
+func MigrateExperiment(e *Experiment) {
+	if e == nil {
+		return
+	}
+	if e.SchemaVersion == 0 {
+		e.SchemaVersion = SchemaVersion
+	}
+	if e.Repetitions == 0 {
+		e.Repetitions = 1
+	}
+	if e.Duration == "" {
+		e.Duration = e.Workload.Duration
+	}
+	if e.Workload.Distribution == "" {
+		e.Workload.Distribution = DistUniform
+	}
+	if e.Workload.Seed == 0 {
+		e.Workload.Seed = 1
+	}
+	if e.Spec.Architecture == "" {
+		e.Spec = SpecFromExperiment(e)
+	}
+	if e.SpecHash == "" {
+		if h, err := e.Spec.SpecHash(); err == nil {
+			e.SpecHash = h
+		}
+	}
+	// 老实验（无 run 列表）且已有顶层结果 → 合成一个虚拟 completed run。
+	// 只在内存视图生效；不写回磁盘（避免污染历史文件）。
+	if len(e.Runs) == 0 && e.Status == ExpStatusCompleted && !e.Result.isEmpty() {
+		run := &ExperimentRun{
+			ID:          "run-legacy-" + e.ID,
+			Index:       1,
+			Status:      RunStatusCompleted,
+			Result:      e.Result,
+			StartedAt:   e.StartedAt,
+			FinishedAt:  e.FinishedAt,
+			Environment: e.Environment,
+		}
+		e.Runs = []*ExperimentRun{run}
+	}
+}
+
+// isEmpty 判断代表性结果是否还没有任何实测数据。
+func (r ExperimentResult) isEmpty() bool {
+	return r.ConnectionsEstablished == nil && r.MessagesReceived == nil && r.P90LatencyUS == nil && r.Drops == nil
 }
 
 // List 返回最近 limit 个实验（按 CreatedAt 降序）。损坏/跳过文件不中断，

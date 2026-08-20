@@ -132,10 +132,12 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await resp.json()) as T;
 }
 
-// ---- Realtime Systems Lab：实验 / 对比 / 证据 ----
+// ---- Realtime Systems Lab：实验 / 对比 / 证据 / Sweep / Regime ----
 
-export type ExpStatus = "created" | "running" | "completed" | "failed" | "stopped";
+export type ExpStatus = "created" | "running" | "completed" | "partial" | "failed" | "stopped";
+export type RunStatus = "running" | "completed" | "failed" | "stopped";
 export type Architecture = "monolith" | "distributed";
+export type WorkloadDist = "uniform" | "hot_room" | "zipf";
 
 export interface Workload {
   connections: number;
@@ -143,6 +145,9 @@ export interface Workload {
   message_rate: number;
   duration: string;
   target: string;
+  distribution?: WorkloadDist;
+  zipf_s?: number;
+  seed?: number;
 }
 
 export interface EnvironmentSnapshot {
@@ -175,6 +180,9 @@ export interface ExperimentResult {
   write_errors: number | null;
   read_errors: number | null;
   drops: number | null;
+  missing_deliveries?: number | null;
+  expected_deliveries?: number | null;
+  delivery_rate?: number | null;
   p50_latency_us: number | null;
   p90_latency_us: number | null;
   p99_latency_us: number | null;
@@ -191,6 +199,110 @@ export interface ExperimentResult {
   notes?: string[];
 }
 
+export interface SystemConfig {
+  batch_size?: number;
+  batch_timeout?: string;
+  workers?: number;
+  requires_restart?: boolean;
+}
+
+export interface MetricAggregate {
+  key: string;
+  label: string;
+  unit: string;
+  group: string;
+  total_rep: number;
+  samples: number;
+  measured: boolean;
+  mean?: number | null;
+  median?: number | null;
+  min?: number | null;
+  max?: number | null;
+  stddev?: number | null;
+  cv?: number | null;
+  ci95_low?: number | null;
+  ci95_high?: number | null;
+  ci_status?: string;
+}
+
+export interface ExperimentAggregate {
+  generated_at: string;
+  successful_repetitions: number;
+  failed_repetitions: number;
+  stopped_repetitions: number;
+  total_repetitions: number;
+  status: string;
+  metrics: Record<string, MetricAggregate>;
+  stability: string;
+  stability_note: string;
+}
+
+export interface WorkloadDiagnostics {
+  distribution: string;
+  rooms: number;
+  connections: number;
+  largest_room_share: number;
+  top_10_percent_room_share: number;
+  mean_room_size: number;
+  max_room_size: number;
+  min_room_size: number;
+  room_sizes?: number[];
+}
+
+export interface ResourceSample {
+  t: number;
+  goroutines?: number;
+  heap_mb?: number;
+  rss_mb?: number;
+  cpu_pct?: number;
+  gc_per_min?: number;
+}
+
+export interface ResourceSummary {
+  sampled: boolean;
+  first_sample?: string | null;
+  last_sample?: string | null;
+  sample_count: number;
+  unavailable_reason?: string;
+  cpu_pct_mean?: number | null;
+  cpu_pct_peak?: number | null;
+  rss_mb_mean?: number | null;
+  rss_mb_peak?: number | null;
+  heap_mb_mean?: number | null;
+  goroutines_mean?: number | null;
+  gc_total?: number | null;
+  gc_pause_ms?: number | null;
+  samples?: ResourceSample[];
+}
+
+export interface ExperimentRun {
+  id: string;
+  index: number;
+  status: RunStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  measurement_start: string | null;
+  measurement_end: string | null;
+  warmup_duration?: string;
+  measurement_duration?: string;
+  environment?: EnvironmentSnapshot | null;
+  workload_diagnostics?: WorkloadDiagnostics | null;
+  resource?: ResourceSummary | null;
+  result: ExperimentResult;
+  error?: string;
+}
+
+export interface ExperimentSpec {
+  architecture: Architecture;
+  regime?: string;
+  config_label?: string;
+  workload: Workload;
+  system?: SystemConfig;
+  warmup: string;
+  duration: string;
+  repetitions: number;
+}
+
 export interface Experiment {
   id: string;
   name: string;
@@ -204,6 +316,18 @@ export interface Experiment {
   environment: EnvironmentSnapshot | null;
   result: ExperimentResult;
   error?: string;
+  schema_version?: number;
+  regime?: string;
+  config_label?: string;
+  warmup?: string;
+  duration?: string;
+  repetitions?: number;
+  spec?: ExperimentSpec;
+  spec_hash?: string;
+  system_config?: SystemConfig;
+  sweep_id?: string;
+  runs?: ExperimentRun[];
+  aggregate?: ExperimentAggregate | null;
 }
 
 export interface ExperimentLive {
@@ -212,6 +336,8 @@ export interface ExperimentLive {
   started_at?: string;
   elapsed_s?: number | null;
   latest?: Record<string, number> | null;
+  repetition?: number;
+  repetitions?: number;
 }
 
 export interface ExperimentDetailResp {
@@ -286,6 +412,118 @@ export interface CompareResp {
   net: string;
 }
 
+// ---- Sweep / Regime（Phase 1.5）----
+
+export type SweepStatus = "created" | "running" | "completed" | "failed" | "stopped" | "partial";
+
+export interface SweepParam {
+  name: string;
+  values: string[];
+}
+
+export interface SweepUnit {
+  config_idx: number;
+  label: string;
+  regime: string;
+  experiment_id?: string;
+  done: boolean;
+  status?: string;
+}
+
+export interface SweepConfigResult {
+  regime: string;
+  config: string;
+  config_index: number;
+  experiment_id: string;
+  status: string;
+  repetitions?: number;
+  success_reps?: number;
+  throughput?: MetricAggregate | null;
+  p99?: MetricAggregate | null;
+  p90?: MetricAggregate | null;
+  delivery_rate?: MetricAggregate | null;
+  cpu?: MetricAggregate | null;
+  best?: boolean;
+  error?: string;
+}
+
+export interface BestConfig {
+  config: string;
+  config_index: number;
+  experiment_id: string;
+  score: number;
+  feasible: boolean;
+  throughput: number;
+  p99: number;
+  delivery_rate: number;
+}
+
+export interface DominationResult {
+  one_config_dominates: boolean;
+  dominant_config?: string;
+  static_optimum_shifts: boolean;
+  conclusion: string;
+}
+
+export interface AdaptiveGateResult {
+  go: boolean;
+  verdict: "GO" | "NOT YET JUSTIFIED";
+  condition_a_shifts: boolean;
+  condition_b_improves: boolean;
+  condition_c_low_variance: boolean;
+  condition_d_tunable_param: boolean;
+  evidence: string[];
+}
+
+export interface SweepReport {
+  generated_at: string;
+  regimes: string[];
+  configs: string[];
+  best_per_regime: Record<string, BestConfig>;
+  domination: DominationResult;
+  adaptive_gate: AdaptiveGateResult;
+}
+
+export interface Sweep {
+  id: string;
+  name: string;
+  status: SweepStatus;
+  architecture: Architecture;
+  regimes: string[];
+  params: SweepParam[];
+  repetitions: number;
+  warmup: string;
+  duration: string;
+  target: string;
+  config_count: number;
+  total_runs: number;
+  max_configs: number;
+  max_total_runs: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error?: string;
+  plan: SweepUnit[];
+  results?: SweepConfigResult[];
+  report?: SweepReport | null;
+}
+
+export interface RegimeInfo {
+  name: string;
+  label: string;
+  description: string;
+  workload: Workload;
+  target: string;
+}
+
+export interface RankingObjective {
+  primary: "throughput" | "p99" | "delivery_rate";
+  maximize: boolean;
+  p99_max_us: number;
+  delivery_min: number;
+  cpu_max: number;
+}
+
 export const api = {
   overview: () => getJSON<Overview>("/api/overview"),
   services: () => getJSON<ServicesResp>("/api/services"),
@@ -300,6 +538,10 @@ export const api = {
     name?: string;
     architecture: Architecture;
     preset: string;
+    regime?: string;
+    warmup?: string;
+    duration?: string;
+    repetitions?: number;
     workload: Workload;
   }) =>
     fetch("/api/experiments", {
@@ -324,6 +566,39 @@ export const api = {
   compare: (left: string, right: string) =>
     getJSON<CompareResp>(`/api/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`),
   evidence: () => getJSON<EvidenceResp>("/api/evidence"),
+  regimes: () => getJSON<{ regimes: RegimeInfo[]; objective: RankingObjective }>("/api/regimes"),
+  sweeps: (limit = 50) => getJSON<{ sweeps: Sweep[]; active_id: string | null }>(`/api/sweeps?limit=${limit}`),
+  createSweep: (body: {
+    name?: string;
+    architecture: Architecture;
+    regimes?: string[];
+    params: SweepParam[];
+    repetitions?: number;
+    warmup?: string;
+    duration?: string;
+    target?: string;
+  }) =>
+    fetch("/api/sweeps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      const j = (await r.json()) as { sweep?: Sweep; error?: string };
+      if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+      return j.sweep!;
+    }),
+  sweepDetail: (id: string) => getJSON<{ sweep: Sweep; running: boolean }>(`/api/sweeps/${encodeURIComponent(id)}`),
+  sweepReport: (id: string) =>
+    getJSON<{ sweep: Sweep; report: SweepReport | null; active: boolean }>(`/api/sweeps/${encodeURIComponent(id)}/report`),
+  sweepStart: (id: string) =>
+    fetch(`/api/sweeps/${encodeURIComponent(id)}/start`, { method: "POST" }).then(async (r) => {
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? `HTTP ${r.status}`);
+    }),
+  sweepStop: (id: string) =>
+    fetch(`/api/sweeps/${encodeURIComponent(id)}/stop`, { method: "POST" }).then(async (r) => {
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? `HTTP ${r.status}`);
+    }),
+  regimeAnalysis: () => getJSON<{ objective: RankingObjective; report: SweepReport | null }>("/api/regime-analysis"),
   loadtestStatus: () => getJSON<LoadtestStatus>("/api/loadtest/status"),
   loadtestStart: (params: Record<string, unknown>) =>
     fetch("/api/loadtest/start", {
