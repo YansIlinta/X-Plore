@@ -1,0 +1,56 @@
+name: distributed-go
+
+on:
+  push:
+    paths:
+      - "danmu/distributed/**"
+      - ".github/workflows/distributed-go.yml"
+  pull_request:
+    paths:
+      - "danmu/distributed/**"
+      - ".github/workflows/distributed-go.yml"
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: danmu/distributed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: danmu/distributed/go.mod
+          cache-dependency-path: danmu/distributed/go.sum
+      - run: go test ./...
+      - run: go vet ./...
+
+  proto-generate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: danmu/distributed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: danmu/distributed/go.mod
+          cache-dependency-path: danmu/distributed/go.sum
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install Go protobuf plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+      - name: Generate protobuf sources
+        run: bash scripts/gen-proto.sh
+      - name: Verify generated tree compiles
+        run: go test ./...
+      - name: Upload generated realtime RPC sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtime-proto-go
+          path: |
+            danmu/distributed/pb/realtime.pb.go
+            danmu/distributed/pb/realtime_grpc.pb.go
+          if-no-files-found: error

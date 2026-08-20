@@ -364,9 +364,10 @@ func main() {
 	}
 	c.startQPSTracker(ctx)
 
-	// gRPC server（Job → Comet.PushRoom）
+	// gRPC server（legacy PushRoom + generic PushEnvelope）
 	grpcSrv := grpc.NewServer()
 	pb.RegisterCometServiceServer(grpcSrv, c)
+	registerRealtimeDeliveryService(grpcSrv, hub)
 	rpcLis, err := net.Listen("tcp", *rpcAddr)
 	if err != nil {
 		log.Fatalf("[comet] rpc listen: %v", err)

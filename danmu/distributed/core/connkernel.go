@@ -244,7 +244,7 @@ type subShard struct {
 // 供断连清理「这个连接订阅了哪些 channel」的 O(1) 读取，无需扫描全部 channel 分片。
 type memberShard struct {
 	mu     sync.RWMutex
-	member map[string]map[string]int // connID -> channel -> count
+	member map[string]map[string]int // connID -> channel -> membership(1)
 }
 
 type SubscriptionIndex struct {
@@ -271,7 +271,8 @@ func (s *SubscriptionIndex) memberShardFor(connID string) *memberShard {
 	return s.members[fnv32(connID)%kernelShards]
 }
 
-// Subscribe 登记一个连接对某 channel 的订阅。
+// Subscribe 登记一个连接对某 channel 的订阅。重复 Subscribe 同一
+// (channel, connectionID) 是幂等的，不会累积反向 membership 计数。
 func (s *SubscriptionIndex) Subscribe(channel string, c *Client) {
 	sh := s.shardFor(channel)
 	sh.mu.Lock()
@@ -281,26 +282,32 @@ func (s *SubscriptionIndex) Subscribe(channel string, c *Client) {
 		sh.chans[channel] = conns
 		s.channelCount.Add(1)
 	}
+	_, existed := conns[c.ConnectionID]
 	conns[c.ConnectionID] = c
 	sh.mu.Unlock()
+	if existed {
+		return
+	}
 
 	ms := s.memberShardFor(c.ConnectionID)
 	ms.mu.Lock()
 	if ms.member[c.ConnectionID] == nil {
 		ms.member[c.ConnectionID] = make(map[string]int)
 	}
-	ms.member[c.ConnectionID][channel]++
+	ms.member[c.ConnectionID][channel] = 1
 	ms.mu.Unlock()
 }
 
-// Unsubscribe 移除一个连接对某 channel 的订阅；channel 空则删除该 channel。
+// Unsubscribe 移除一个连接对某 channel 的订阅；重复 Unsubscribe 幂等。
 func (s *SubscriptionIndex) Unsubscribe(channel string, c *Client) {
 	sh := s.shardFor(channel)
 	sh.mu.Lock()
+	removed := false
 	conns, ok := sh.chans[channel]
 	if ok {
 		if _, exists := conns[c.ConnectionID]; exists {
 			delete(conns, c.ConnectionID)
+			removed = true
 			if len(conns) == 0 {
 				delete(sh.chans, channel)
 				s.channelCount.Add(-1)
@@ -308,15 +315,14 @@ func (s *SubscriptionIndex) Unsubscribe(channel string, c *Client) {
 		}
 	}
 	sh.mu.Unlock()
+	if !removed {
+		return
+	}
 
 	ms := s.memberShardFor(c.ConnectionID)
 	ms.mu.Lock()
 	if m := ms.member[c.ConnectionID]; m != nil {
-		if m[channel] <= 1 {
-			delete(m, channel)
-		} else {
-			m[channel]--
-		}
+		delete(m, channel)
 		if len(m) == 0 {
 			delete(ms.member, c.ConnectionID)
 		}
