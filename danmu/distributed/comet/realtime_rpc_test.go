@@ -52,23 +52,25 @@ func TestCoreEnvelopeFromProtoPreservesFields(t *testing.T) {
 	}
 }
 
-func TestCoreEnvelopeFromProtoRejectsUnspecifiedEnums(t *testing.T) {
-	base := &pb.DeliveryEnvelope{
+func validProtoEnvelope() *pb.DeliveryEnvelope {
+	return &pb.DeliveryEnvelope{
 		TargetType:    pb.TargetType_TARGET_USER,
 		TargetId:      "u1",
 		DeliveryClass: pb.DeliveryClass_DELIVERY_EPHEMERAL,
 		MessageType:   "DANMU",
 	}
+}
 
-	m := *base
+func TestCoreEnvelopeFromProtoRejectsUnspecifiedEnums(t *testing.T) {
+	m := validProtoEnvelope()
 	m.TargetType = pb.TargetType_TARGET_TYPE_UNSPECIFIED
-	if _, err := coreEnvelopeFromProto(&m); err == nil {
+	if _, err := coreEnvelopeFromProto(m); err == nil {
 		t.Fatal("unspecified target type must fail")
 	}
 
-	m = *base
+	m = validProtoEnvelope()
 	m.DeliveryClass = pb.DeliveryClass_DELIVERY_CLASS_UNSPECIFIED
-	if _, err := coreEnvelopeFromProto(&m); err == nil {
+	if _, err := coreEnvelopeFromProto(m); err == nil {
 		t.Fatal("unspecified delivery class must fail")
 	}
 }
