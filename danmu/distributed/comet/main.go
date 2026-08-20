@@ -354,6 +354,15 @@ func main() {
 	}
 	hub.Uplink = c.onUplink
 
+	routeClose, routeEnabled, err := setupRouteLeases(ctx, hub, advertiseAddr(*advertise, *rpcAddr))
+	if err != nil {
+		log.Fatalf("[comet] route store: %v", err)
+	}
+	defer routeClose()
+	if routeEnabled {
+		log.Printf("[comet] route leases enabled endpoint=%s", advertiseAddr(*advertise, *rpcAddr))
+	}
+
 	if standalone {
 		log.Println("[comet] standalone mode: 本机过滤+广播，不经 logic/kafka/job")
 	}

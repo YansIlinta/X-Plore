@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -18,11 +20,18 @@ import (
 // the protobuf representation and translates it to the domain contract.
 type realtimeDeliveryServer struct {
 	pb.UnimplementedRealtimeDeliveryServiceServer
-	hub *core.Hub
+	hub    *core.Hub
+	tracer *core.TraceRecorder
 }
 
+// registerRealtimeDeliveryService keeps the Phase-2 registration/test surface.
+// Phase 3 production wiring uses the tracer-aware variant below.
 func registerRealtimeDeliveryService(reg grpc.ServiceRegistrar, hub *core.Hub) {
-	pb.RegisterRealtimeDeliveryServiceServer(reg, &realtimeDeliveryServer{hub: hub})
+	registerRealtimeDeliveryServiceWithTracer(reg, hub, nil)
+}
+
+func registerRealtimeDeliveryServiceWithTracer(reg grpc.ServiceRegistrar, hub *core.Hub, tracer *core.TraceRecorder) {
+	pb.RegisterRealtimeDeliveryServiceServer(reg, &realtimeDeliveryServer{hub: hub, tracer: tracer})
 }
 
 func (s *realtimeDeliveryServer) PushEnvelope(ctx context.Context, req *pb.PushEnvelopeReq) (*pb.PushEnvelopeResp, error) {
@@ -41,6 +50,26 @@ func (s *realtimeDeliveryServer) PushEnvelope(ctx context.Context, req *pb.PushE
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
+	// Keep route-aware PushEnvelope trace-compatible with legacy PushRoom. The
+	// Job forwards the same sampled msg IDs through gRPC metadata; for Danmu
+	// channels we convert back to roomID so existing trace views remain comparable.
+	if s.tracer != nil && s.tracer.Enabled() {
+		if ids := traceIDsFromCtx(ctx); len(ids) > 0 {
+			scope := env.TargetID
+			if env.TargetType == core.TargetChannel {
+				if roomID, ok := core.DanmuRoomID(env.TargetID); ok {
+					scope = roomID
+				}
+			}
+			now := time.Now().UnixNano()
+			detail := "rpc=PushEnvelope target=" + string(env.TargetType) + " delivered=" + strconv.Itoa(result.Delivered)
+			for _, id := range ids {
+				s.tracer.Record(id, core.HopCometDeliver, scope, detail, now)
+			}
+		}
+	}
+
 	return &pb.PushEnvelopeResp{Delivered: int32(result.Delivered)}, nil
 }
 
