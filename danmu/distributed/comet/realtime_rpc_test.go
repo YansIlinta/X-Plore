@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"net"
 	"reflect"
 	"testing"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/YansIlinta/danmu-distributed/core"
 	"github.com/YansIlinta/danmu-distributed/pb"
@@ -118,5 +122,49 @@ func TestPushEnvelopeDoesNotInventReliableGuarantee(t *testing.T) {
 	}
 	if resp.Delivered != 0 {
 		t.Fatalf("Delivered=%d want 0", resp.Delivered)
+	}
+}
+
+func TestRealtimeDeliveryServiceRegisteredAndCallable(t *testing.T) {
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	registerRealtimeDeliveryService(server, core.NewHub("gw-test", context.Background()))
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	ctx := context.Background()
+	conn, err := grpc.DialContext(
+		ctx,
+		"bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial bufconn: %v", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewRealtimeDeliveryServiceClient(conn)
+	resp, err := client.PushEnvelope(ctx, &pb.PushEnvelopeReq{
+		Envelope: &pb.DeliveryEnvelope{
+			TargetType:    pb.TargetType_TARGET_USER,
+			TargetId:      "offline-user",
+			DeliveryClass: pb.DeliveryClass_DELIVERY_EPHEMERAL,
+			MessageType:   "DANMU",
+		},
+		ClientPayload: []byte(`[{"type":"danmu"}]`),
+	})
+	if err != nil {
+		t.Fatalf("generated client PushEnvelope: %v", err)
+	}
+	if resp.Delivered != 0 {
+		t.Fatalf("Delivered=%d want 0 for offline user", resp.Delivered)
 	}
 }
