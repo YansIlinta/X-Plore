@@ -1,0 +1,1225 @@
+{
+  "id": "exp-1787203604-77f2b1bb",
+  "name": "Hot Room / bt=50ms",
+  "architecture": "monolith",
+  "preset": "",
+  "status": "completed",
+  "workload": {
+    "connections": 150,
+    "rooms": 10,
+    "message_rate": 1.5,
+    "duration": "5s",
+    "target": "ws://127.0.0.1:18181",
+    "distribution": "hot_room",
+    "seed": 2
+  },
+  "created_at": "2026-08-20T05:26:44.212565197Z",
+  "started_at": "2026-08-20T05:26:44.217582543Z",
+  "finished_at": "2026-08-20T05:27:39.897571151Z",
+  "environment": {
+    "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+    "git_dirty": true,
+    "go_version": "go1.26.0",
+    "os": "linux",
+    "arch": "amd64",
+    "cpu_cores": 2,
+    "memory_bytes": 2029678592,
+    "hostname": "VM-0-13-ubuntu"
+  },
+  "result": {
+    "connections_requested": null,
+    "connections_established": 150,
+    "connections_failed": null,
+    "messages_sent": null,
+    "messages_received": null,
+    "drops": 7708,
+    "missing_deliveries": 7708,
+    "delivery_rate": 0.9796126642630572,
+    "write_errors": 0,
+    "read_errors": 0,
+    "p50_latency_us": 37151,
+    "p90_latency_us": 63679,
+    "p99_latency_us": 71039,
+    "max_latency_us": 73599,
+    "send_rate": 115.77765275502932,
+    "receive_rate": 11193.383468356236,
+    "kafka_available": null,
+    "kafka_lag": null,
+    "etcd_up": null,
+    "trace_samples": null,
+    "trace_completion_rate": null,
+    "service_snapshot": null,
+    "notes": [
+      "result shown is the experiment aggregate representative: latency/scale = median, throughput/rate = mean, errors = max"
+    ]
+  },
+  "schema_version": 1,
+  "regime": "hot-room",
+  "config_label": "bt=50ms",
+  "warmup": "2s",
+  "duration": "5s",
+  "repetitions": 5,
+  "spec": {
+    "architecture": "monolith",
+    "regime": "hot-room",
+    "config_label": "bt=50ms",
+    "workload": {
+      "connections": 150,
+      "rooms": 10,
+      "message_rate": 1.5,
+      "duration": "5s",
+      "target": "ws://127.0.0.1:18181",
+      "distribution": "hot_room",
+      "seed": 2
+    },
+    "system": {
+      "batch_timeout": "50ms",
+      "requires_restart": true
+    },
+    "warmup": "2s",
+    "duration": "5s",
+    "repetitions": 5
+  },
+  "spec_hash": "9326135e66326f3ab0da96c4cdc6292f71df037e7d45e38f73673a4689baad60",
+  "system_config": {
+    "batch_timeout": "50ms",
+    "requires_restart": true
+  },
+  "sweep_id": "sweep-1787203206-1c52757f",
+  "runs": [
+    {
+      "id": "run-1787203604-3fd042b4",
+      "index": 1,
+      "status": "completed",
+      "started_at": "2026-08-20T05:26:44.444228701Z",
+      "finished_at": "2026-08-20T05:26:55.532838705Z",
+      "measurement_start": "2026-08-20T05:26:46.455137234Z",
+      "measurement_end": "2026-08-20T05:26:55.529140328Z",
+      "warmup_duration": "2s",
+      "measurement_duration": "5s",
+      "environment": {
+        "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+        "git_dirty": true,
+        "go_version": "go1.26.0",
+        "os": "linux",
+        "arch": "amd64",
+        "cpu_cores": 2,
+        "memory_bytes": 2029678592,
+        "hostname": "VM-0-13-ubuntu"
+      },
+      "workload_diagnostics": {
+        "distribution": "hot_room",
+        "rooms": 10,
+        "connections": 150,
+        "largest_room_share": 0.8,
+        "top_10_percent_room_share": 0.8,
+        "mean_room_size": 15,
+        "max_room_size": 120,
+        "min_room_size": 3,
+        "room_sizes": [
+          120,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "resource": {
+        "sampled": true,
+        "first_sample": "2026-08-20T05:26:44.453449172Z",
+        "last_sample": "2026-08-20T05:26:55.453690554Z",
+        "sample_count": 12,
+        "cpu_pct_mean": 2.9996901160016063,
+        "cpu_pct_peak": 6.002732798130944,
+        "rss_mb_mean": 29.336263020833332,
+        "rss_mb_peak": 32.9765625,
+        "heap_mb_mean": 9.25,
+        "heap_mb_peak": 13,
+        "goroutines_mean": 175.33333333333334,
+        "goroutines_peak": 314,
+        "gc_total": 8,
+        "gc_pause_ms": 3.130259,
+        "samples": [
+          {
+            "t": 1787203604,
+            "goroutines": 14,
+            "heap_mb": 2,
+            "rss_mb": 17.98046875
+          },
+          {
+            "t": 1787203605,
+            "goroutines": 160,
+            "heap_mb": 4,
+            "rss_mb": 21.4140625,
+            "cpu_pct": 4.000363613050608,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203606,
+            "goroutines": 304,
+            "heap_mb": 6,
+            "rss_mb": 23.44140625,
+            "cpu_pct": 5.992194854607741,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203607,
+            "goroutines": 314,
+            "heap_mb": 9,
+            "rss_mb": 29.05859375,
+            "cpu_pct": 4.0052605893632816,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203608,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 31.1875,
+            "cpu_pct": 4.001746033825987,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203609,
+            "goroutines": 314,
+            "heap_mb": 13,
+            "rss_mb": 32.51171875,
+            "cpu_pct": 3.9910506197501956,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203610,
+            "goroutines": 314,
+            "heap_mb": 10,
+            "rss_mb": 31.5625,
+            "cpu_pct": 4.004812298597551,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203611,
+            "goroutines": 314,
+            "heap_mb": 12,
+            "rss_mb": 32.97265625,
+            "cpu_pct": 6.002732798130944,
+            "gc_per_min": 2
+          },
+          {
+            "t": 1787203612,
+            "goroutines": 14,
+            "heap_mb": 12,
+            "rss_mb": 32.9765625,
+            "cpu_pct": 1.9997549480289134
+          },
+          {
+            "t": 1787203613,
+            "goroutines": 14,
+            "heap_mb": 12,
+            "rss_mb": 32.9765625
+          },
+          {
+            "t": 1787203614,
+            "goroutines": 14,
+            "heap_mb": 12,
+            "rss_mb": 32.9765625
+          },
+          {
+            "t": 1787203615,
+            "goroutines": 14,
+            "heap_mb": 12,
+            "rss_mb": 32.9765625,
+            "cpu_pct": 1.9983656366640543
+          }
+        ]
+      },
+      "result": {
+        "connections_requested": 150,
+        "connections_established": 150,
+        "connections_failed": 0,
+        "messages_sent": 1050,
+        "messages_received": 101514,
+        "drops": 2280,
+        "missing_deliveries": 2280,
+        "expected_deliveries": 99234,
+        "delivery_rate": 0.9775400437378096,
+        "write_errors": 0,
+        "read_errors": 0,
+        "p50_latency_us": 29119,
+        "p90_latency_us": 52447,
+        "p99_latency_us": 63839,
+        "max_latency_us": 67135,
+        "send_rate": 115.71519087251481,
+        "receive_rate": 11187.344653554732,
+        "kafka_available": null,
+        "kafka_lag": null,
+        "etcd_up": null,
+        "trace_samples": null,
+        "trace_completion_rate": null,
+        "service_snapshot": null
+      }
+    },
+    {
+      "id": "run-1787203615-dd2c75a3",
+      "index": 2,
+      "status": "completed",
+      "started_at": "2026-08-20T05:26:55.535646801Z",
+      "finished_at": "2026-08-20T05:27:06.614173474Z",
+      "measurement_start": "2026-08-20T05:26:57.546145075Z",
+      "measurement_end": "2026-08-20T05:27:06.611898215Z",
+      "warmup_duration": "2s",
+      "measurement_duration": "5s",
+      "environment": {
+        "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+        "git_dirty": true,
+        "go_version": "go1.26.0",
+        "os": "linux",
+        "arch": "amd64",
+        "cpu_cores": 2,
+        "memory_bytes": 2029678592,
+        "hostname": "VM-0-13-ubuntu"
+      },
+      "workload_diagnostics": {
+        "distribution": "hot_room",
+        "rooms": 10,
+        "connections": 150,
+        "largest_room_share": 0.8,
+        "top_10_percent_room_share": 0.8,
+        "mean_room_size": 15,
+        "max_room_size": 120,
+        "min_room_size": 3,
+        "room_sizes": [
+          120,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "resource": {
+        "sampled": true,
+        "first_sample": "2026-08-20T05:26:55.543775718Z",
+        "last_sample": "2026-08-20T05:27:06.544198136Z",
+        "sample_count": 12,
+        "cpu_pct_mean": 2.833166167762924,
+        "cpu_pct_peak": 5.999204091592373,
+        "rss_mb_mean": 33.544270833333336,
+        "rss_mb_peak": 35.84765625,
+        "heap_mb_mean": 8.666666666666666,
+        "heap_mb_peak": 12,
+        "goroutines_mean": 175.5,
+        "goroutines_peak": 314,
+        "gc_total": 5,
+        "gc_pause_ms": 1.818926,
+        "samples": [
+          {
+            "t": 1787203615,
+            "goroutines": 14,
+            "heap_mb": 12,
+            "rss_mb": 32.98046875
+          },
+          {
+            "t": 1787203616,
+            "goroutines": 160,
+            "heap_mb": 4,
+            "rss_mb": 27.9765625,
+            "cpu_pct": 5.9985513258606,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203617,
+            "goroutines": 306,
+            "heap_mb": 6,
+            "rss_mb": 28.44921875,
+            "cpu_pct": 5.999204091592373,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203618,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 28.96875,
+            "cpu_pct": 3.9982339920404177
+          },
+          {
+            "t": 1787203619,
+            "goroutines": 314,
+            "heap_mb": 11,
+            "rss_mb": 33.90625,
+            "cpu_pct": 3.9882874486828173,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203620,
+            "goroutines": 314,
+            "heap_mb": 11,
+            "rss_mb": 35.38671875,
+            "cpu_pct": 4.006386633014715,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203621,
+            "goroutines": 314,
+            "heap_mb": 8,
+            "rss_mb": 35.68359375,
+            "cpu_pct": 4.009132294206401,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203622,
+            "goroutines": 314,
+            "heap_mb": 9,
+            "rss_mb": 35.81640625,
+            "cpu_pct": 3.9992999345443576
+          },
+          {
+            "t": 1787203623,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 35.828125,
+            "cpu_pct": 1.9988982932134074
+          },
+          {
+            "t": 1787203624,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 35.83984375
+          },
+          {
+            "t": 1787203625,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 35.84765625
+          },
+          {
+            "t": 1787203626,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 35.84765625
+          }
+        ]
+      },
+      "result": {
+        "connections_requested": 150,
+        "connections_established": 150,
+        "connections_failed": 0,
+        "messages_sent": 1050,
+        "messages_received": 101514,
+        "drops": 0,
+        "missing_deliveries": 0,
+        "expected_deliveries": 101514,
+        "delivery_rate": 1,
+        "write_errors": 0,
+        "read_errors": 0,
+        "p50_latency_us": 47455,
+        "p90_latency_us": 66815,
+        "p99_latency_us": 73663,
+        "max_latency_us": 79743,
+        "send_rate": 115.82049321056188,
+        "receive_rate": 11197.525283597122,
+        "kafka_available": null,
+        "kafka_lag": null,
+        "etcd_up": null,
+        "trace_samples": null,
+        "trace_completion_rate": null,
+        "service_snapshot": null
+      }
+    },
+    {
+      "id": "run-1787203626-0a6ddd3a",
+      "index": 3,
+      "status": "completed",
+      "started_at": "2026-08-20T05:27:06.616822804Z",
+      "finished_at": "2026-08-20T05:27:17.719127905Z",
+      "measurement_start": "2026-08-20T05:27:08.641442557Z",
+      "measurement_end": "2026-08-20T05:27:17.713361266Z",
+      "warmup_duration": "2s",
+      "measurement_duration": "5s",
+      "environment": {
+        "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+        "git_dirty": true,
+        "go_version": "go1.26.0",
+        "os": "linux",
+        "arch": "amd64",
+        "cpu_cores": 2,
+        "memory_bytes": 2029678592,
+        "hostname": "VM-0-13-ubuntu"
+      },
+      "workload_diagnostics": {
+        "distribution": "hot_room",
+        "rooms": 10,
+        "connections": 150,
+        "largest_room_share": 0.8,
+        "top_10_percent_room_share": 0.8,
+        "mean_room_size": 15,
+        "max_room_size": 120,
+        "min_room_size": 3,
+        "room_sizes": [
+          120,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "resource": {
+        "sampled": true,
+        "first_sample": "2026-08-20T05:27:06.639077871Z",
+        "last_sample": "2026-08-20T05:27:17.64156407Z",
+        "sample_count": 12,
+        "cpu_pct_mean": 2.6663676268194494,
+        "cpu_pct_peak": 5.996927288399043,
+        "rss_mb_mean": 35.306315104166664,
+        "rss_mb_peak": 38.08203125,
+        "heap_mb_mean": 11.25,
+        "heap_mb_peak": 14,
+        "goroutines_mean": 175.16666666666666,
+        "goroutines_peak": 314,
+        "gc_total": 3,
+        "gc_pause_ms": 2.4431339999999997,
+        "samples": [
+          {
+            "t": 1787203626,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 35.84765625
+          },
+          {
+            "t": 1787203627,
+            "goroutines": 158,
+            "heap_mb": 12,
+            "rss_mb": 36.0390625,
+            "cpu_pct": 4.000051284657521
+          },
+          {
+            "t": 1787203628,
+            "goroutines": 304,
+            "heap_mb": 6,
+            "rss_mb": 30.3515625,
+            "cpu_pct": 5.99623189592182,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203629,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 30.40625,
+            "cpu_pct": 2.00016311330189
+          },
+          {
+            "t": 1787203630,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 31.5078125,
+            "cpu_pct": 4.000948288759608,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203631,
+            "goroutines": 314,
+            "heap_mb": 12,
+            "rss_mb": 34.55859375,
+            "cpu_pct": 4.001363612701481
+          },
+          {
+            "t": 1787203632,
+            "goroutines": 314,
+            "heap_mb": 12,
+            "rss_mb": 34.5625,
+            "cpu_pct": 3.99914278774259
+          },
+          {
+            "t": 1787203633,
+            "goroutines": 314,
+            "heap_mb": 14,
+            "rss_mb": 38.07421875,
+            "cpu_pct": 5.996927288399043,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203634,
+            "goroutines": 14,
+            "heap_mb": 14,
+            "rss_mb": 38.08203125
+          },
+          {
+            "t": 1787203635,
+            "goroutines": 14,
+            "heap_mb": 14,
+            "rss_mb": 38.08203125,
+            "cpu_pct": 2.001583250349443
+          },
+          {
+            "t": 1787203636,
+            "goroutines": 14,
+            "heap_mb": 14,
+            "rss_mb": 38.08203125
+          },
+          {
+            "t": 1787203637,
+            "goroutines": 14,
+            "heap_mb": 14,
+            "rss_mb": 38.08203125
+          }
+        ]
+      },
+      "result": {
+        "connections_requested": 150,
+        "connections_established": 150,
+        "connections_failed": 0,
+        "messages_sent": 1050,
+        "messages_received": 101514,
+        "drops": 80,
+        "missing_deliveries": 80,
+        "expected_deliveries": 101434,
+        "delivery_rate": 0.9992119313592214,
+        "write_errors": 0,
+        "read_errors": 0,
+        "p50_latency_us": 33759,
+        "p90_latency_us": 51839,
+        "p99_latency_us": 57215,
+        "max_latency_us": 60447,
+        "send_rate": 115.7417778620882,
+        "receive_rate": 11189.915083706688,
+        "kafka_available": null,
+        "kafka_lag": null,
+        "etcd_up": null,
+        "trace_samples": null,
+        "trace_completion_rate": null,
+        "service_snapshot": null
+      }
+    },
+    {
+      "id": "run-1787203637-d1b009a4",
+      "index": 4,
+      "status": "completed",
+      "started_at": "2026-08-20T05:27:17.725040002Z",
+      "finished_at": "2026-08-20T05:27:28.808604209Z",
+      "measurement_start": "2026-08-20T05:27:19.743610572Z",
+      "measurement_end": "2026-08-20T05:27:28.805306252Z",
+      "warmup_duration": "2s",
+      "measurement_duration": "5s",
+      "environment": {
+        "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+        "git_dirty": true,
+        "go_version": "go1.26.0",
+        "os": "linux",
+        "arch": "amd64",
+        "cpu_cores": 2,
+        "memory_bytes": 2029678592,
+        "hostname": "VM-0-13-ubuntu"
+      },
+      "workload_diagnostics": {
+        "distribution": "hot_room",
+        "rooms": 10,
+        "connections": 150,
+        "largest_room_share": 0.8,
+        "top_10_percent_room_share": 0.8,
+        "mean_room_size": 15,
+        "max_room_size": 120,
+        "min_room_size": 3,
+        "room_sizes": [
+          120,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "resource": {
+        "sampled": true,
+        "first_sample": "2026-08-20T05:27:17.73972963Z",
+        "last_sample": "2026-08-20T05:27:28.73996321Z",
+        "sample_count": 12,
+        "cpu_pct_mean": 3.000186877411896,
+        "cpu_pct_peak": 6.003168340180244,
+        "rss_mb_mean": 35.11067708333333,
+        "rss_mb_peak": 38.08203125,
+        "heap_mb_mean": 8.75,
+        "heap_mb_peak": 14,
+        "goroutines_mean": 175.5,
+        "goroutines_peak": 314,
+        "gc_total": 6,
+        "gc_pause_ms": 6.797756,
+        "samples": [
+          {
+            "t": 1787203637,
+            "goroutines": 14,
+            "heap_mb": 14,
+            "rss_mb": 38.08203125
+          },
+          {
+            "t": 1787203638,
+            "goroutines": 160,
+            "heap_mb": 4,
+            "rss_mb": 27.328125,
+            "cpu_pct": 5.99590032114312,
+            "gc_per_min": 2
+          },
+          {
+            "t": 1787203639,
+            "goroutines": 306,
+            "heap_mb": 6,
+            "rss_mb": 28.7421875,
+            "cpu_pct": 6.002398642531136,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203640,
+            "goroutines": 314,
+            "heap_mb": 8,
+            "rss_mb": 31.69921875,
+            "cpu_pct": 1.9991633741178922
+          },
+          {
+            "t": 1787203641,
+            "goroutines": 314,
+            "heap_mb": 8,
+            "rss_mb": 35.3359375,
+            "cpu_pct": 4.001850119339773,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203642,
+            "goroutines": 314,
+            "heap_mb": 12,
+            "rss_mb": 36.03125,
+            "cpu_pct": 3.9976382632739083
+          },
+          {
+            "t": 1787203643,
+            "goroutines": 314,
+            "heap_mb": 9,
+            "rss_mb": 37.29296875,
+            "cpu_pct": 3.9997297462605044,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203644,
+            "goroutines": 314,
+            "heap_mb": 8,
+            "rss_mb": 37.36328125,
+            "cpu_pct": 6.003168340180244,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203645,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 37.36328125,
+            "cpu_pct": 2.000762332464678
+          },
+          {
+            "t": 1787203646,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 37.36328125
+          },
+          {
+            "t": 1787203647,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 37.36328125
+          },
+          {
+            "t": 1787203648,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 37.36328125,
+            "cpu_pct": 2.0016313896314912
+          }
+        ]
+      },
+      "result": {
+        "connections_requested": 150,
+        "connections_established": 150,
+        "connections_failed": 0,
+        "messages_sent": 1050,
+        "messages_received": 101514,
+        "drops": 7708,
+        "missing_deliveries": 7708,
+        "expected_deliveries": 93806,
+        "delivery_rate": 0.9240695864609807,
+        "write_errors": 0,
+        "read_errors": 0,
+        "p50_latency_us": 37151,
+        "p90_latency_us": 65503,
+        "p99_latency_us": 73215,
+        "max_latency_us": 76479,
+        "send_rate": 115.87235293251429,
+        "receive_rate": 11202.53908151548,
+        "kafka_available": null,
+        "kafka_lag": null,
+        "etcd_up": null,
+        "trace_samples": null,
+        "trace_completion_rate": null,
+        "service_snapshot": null
+      }
+    },
+    {
+      "id": "run-1787203648-d242257d",
+      "index": 5,
+      "status": "completed",
+      "started_at": "2026-08-20T05:27:28.812079449Z",
+      "finished_at": "2026-08-20T05:27:39.897560462Z",
+      "measurement_start": "2026-08-20T05:27:30.8218051Z",
+      "measurement_end": "2026-08-20T05:27:39.893984743Z",
+      "warmup_duration": "2s",
+      "measurement_duration": "5s",
+      "environment": {
+        "git_commit": "6231c5ff58c90aa3a882f188e88564f43476c743",
+        "git_dirty": true,
+        "go_version": "go1.26.0",
+        "os": "linux",
+        "arch": "amd64",
+        "cpu_cores": 2,
+        "memory_bytes": 2029678592,
+        "hostname": "VM-0-13-ubuntu"
+      },
+      "workload_diagnostics": {
+        "distribution": "hot_room",
+        "rooms": 10,
+        "connections": 150,
+        "largest_room_share": 0.8,
+        "top_10_percent_room_share": 0.8,
+        "mean_room_size": 15,
+        "max_room_size": 120,
+        "min_room_size": 3,
+        "room_sizes": [
+          120,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "resource": {
+        "sampled": true,
+        "first_sample": "2026-08-20T05:27:28.820361392Z",
+        "last_sample": "2026-08-20T05:27:39.820533923Z",
+        "sample_count": 12,
+        "cpu_pct_mean": 2.8330046960944437,
+        "cpu_pct_peak": 6.006040473103135,
+        "rss_mb_mean": 35.226888020833336,
+        "rss_mb_peak": 37.41015625,
+        "heap_mb_mean": 10.25,
+        "heap_mb_peak": 14,
+        "goroutines_mean": 175.33333333333334,
+        "goroutines_peak": 314,
+        "gc_total": 2,
+        "gc_pause_ms": 0.7715,
+        "samples": [
+          {
+            "t": 1787203648,
+            "goroutines": 14,
+            "heap_mb": 9,
+            "rss_mb": 37.36328125
+          },
+          {
+            "t": 1787203649,
+            "goroutines": 160,
+            "heap_mb": 11,
+            "rss_mb": 37.3984375,
+            "cpu_pct": 4.001640612626567
+          },
+          {
+            "t": 1787203650,
+            "goroutines": 304,
+            "heap_mb": 14,
+            "rss_mb": 37.41015625,
+            "cpu_pct": 3.999317484476734
+          },
+          {
+            "t": 1787203651,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 31.140625,
+            "cpu_pct": 5.999715739467979,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203652,
+            "goroutines": 314,
+            "heap_mb": 7,
+            "rss_mb": 34.4921875,
+            "cpu_pct": 5.988078806961447,
+            "gc_per_min": 1
+          },
+          {
+            "t": 1787203653,
+            "goroutines": 314,
+            "heap_mb": 10,
+            "rss_mb": 34.91015625,
+            "cpu_pct": 6.006040473103135
+          },
+          {
+            "t": 1787203654,
+            "goroutines": 314,
+            "heap_mb": 10,
+            "rss_mb": 34.93359375,
+            "cpu_pct": 2.0015331423625193
+          },
+          {
+            "t": 1787203655,
+            "goroutines": 314,
+            "heap_mb": 11,
+            "rss_mb": 35.01171875,
+            "cpu_pct": 3.999261500370603
+          },
+          {
+            "t": 1787203656,
+            "goroutines": 14,
+            "heap_mb": 11,
+            "rss_mb": 35.015625
+          },
+          {
+            "t": 1787203657,
+            "goroutines": 14,
+            "heap_mb": 11,
+            "rss_mb": 35.015625,
+            "cpu_pct": 2.0004685937643405
+          },
+          {
+            "t": 1787203658,
+            "goroutines": 14,
+            "heap_mb": 11,
+            "rss_mb": 35.015625
+          },
+          {
+            "t": 1787203659,
+            "goroutines": 14,
+            "heap_mb": 11,
+            "rss_mb": 35.015625
+          }
+        ]
+      },
+      "result": {
+        "connections_requested": 150,
+        "connections_established": 150,
+        "connections_failed": 0,
+        "messages_sent": 1050,
+        "messages_received": 101514,
+        "drops": 280,
+        "missing_deliveries": 280,
+        "expected_deliveries": 101234,
+        "delivery_rate": 0.9972417597572748,
+        "write_errors": 0,
+        "read_errors": 0,
+        "p50_latency_us": 42591,
+        "p90_latency_us": 63679,
+        "p99_latency_us": 71039,
+        "max_latency_us": 73599,
+        "send_rate": 115.73844889746745,
+        "receive_rate": 11189.593239407153,
+        "kafka_available": null,
+        "kafka_lag": null,
+        "etcd_up": null,
+        "trace_samples": null,
+        "trace_completion_rate": null,
+        "service_snapshot": null
+      }
+    }
+  ],
+  "aggregate": {
+    "generated_at": "2026-08-20T05:27:39.90031678Z",
+    "successful_repetitions": 5,
+    "failed_repetitions": 0,
+    "stopped_repetitions": 0,
+    "total_repetitions": 5,
+    "status": "completed",
+    "metrics": {
+      "connections_established": {
+        "key": "connections_established",
+        "label": "Connections established",
+        "unit": "conns",
+        "group": "scale",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 150,
+        "median": 150,
+        "min": 150,
+        "max": 150,
+        "stddev": 0,
+        "cv": 0,
+        "ci95_low": 150,
+        "ci95_high": 150,
+        "ci_status": "ok"
+      },
+      "cpu_pct": {
+        "key": "cpu_pct",
+        "label": "Server CPU",
+        "unit": "%",
+        "group": "resource",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 2.8664830968180635,
+        "median": 2.833166167762924,
+        "min": 2.6663676268194494,
+        "max": 3.000186877411896,
+        "stddev": 0.1395509166167416,
+        "cv": 0.048683669815339205,
+        "ci95_low": 2.7663595385108795,
+        "ci95_high": 2.9665840309179856,
+        "ci_status": "ok"
+      },
+      "delivery_rate": {
+        "key": "delivery_rate",
+        "label": "Delivery rate",
+        "unit": "rate",
+        "group": "reliability",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 0.9796126642630572,
+        "median": 0.9972417597572748,
+        "min": 0.9240695864609807,
+        "max": 1,
+        "stddev": 0.032403275238280516,
+        "cv": 0.03307764019430766,
+        "ci95_low": 0.9532537384006148,
+        "ci95_high": 0.9989755107669878,
+        "ci_status": "ok"
+      },
+      "goroutines": {
+        "key": "goroutines",
+        "label": "Server goroutines",
+        "unit": "",
+        "group": "resource",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 175.36666666666667,
+        "median": 175.33333333333334,
+        "min": 175.16666666666666,
+        "max": 175.5,
+        "stddev": 0.13944333775568152,
+        "cv": 0.0007951530379529453,
+        "ci95_low": 175.26666666666665,
+        "ci95_high": 175.46666666666667,
+        "ci_status": "ok"
+      },
+      "heap_mb": {
+        "key": "heap_mb",
+        "label": "Server heap",
+        "unit": "MB",
+        "group": "resource",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 9.633333333333333,
+        "median": 9.25,
+        "min": 8.666666666666666,
+        "max": 11.25,
+        "stddev": 1.101766258735894,
+        "cv": 0.11437019986877793,
+        "ci95_low": 8.81625,
+        "ci95_high": 10.533333333333333,
+        "ci_status": "ok"
+      },
+      "max_latency_us": {
+        "key": "max_latency_us",
+        "label": "Max latency",
+        "unit": "µs",
+        "group": "latency",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 71480.6,
+        "median": 73599,
+        "min": 60447,
+        "max": 79743,
+        "stddev": 7719.511694401402,
+        "cv": 0.10799450052743544,
+        "ci95_low": 65752.6,
+        "ci95_high": 77221.4,
+        "ci_status": "ok"
+      },
+      "missing_deliveries": {
+        "key": "missing_deliveries",
+        "label": "Missing deliveries",
+        "unit": "msgs",
+        "group": "reliability",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 2069.6,
+        "median": 280,
+        "min": 0,
+        "max": 7708,
+        "stddev": 3289.3860825388065,
+        "cv": 1.5893825292514527,
+        "ci95_low": 88,
+        "ci95_high": 5080.799999999999,
+        "ci_status": "ok"
+      },
+      "p50_latency_us": {
+        "key": "p50_latency_us",
+        "label": "P50 latency",
+        "unit": "µs",
+        "group": "latency",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 38015,
+        "median": 37151,
+        "min": 29119,
+        "max": 47455,
+        "stddev": 7212.007764832204,
+        "cv": 0.1897147906045562,
+        "ci95_low": 32581.4,
+        "ci95_high": 43448.6,
+        "ci_status": "ok"
+      },
+      "p90_latency_us": {
+        "key": "p90_latency_us",
+        "label": "P90 latency",
+        "unit": "µs",
+        "group": "latency",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 60056.6,
+        "median": 63679,
+        "min": 51839,
+        "max": 66815,
+        "stddev": 7312.5916609639835,
+        "cv": 0.12176166584461964,
+        "ci95_low": 54450.2,
+        "ci95_high": 65400.6,
+        "ci_status": "ok"
+      },
+      "p99_latency_us": {
+        "key": "p99_latency_us",
+        "label": "P99 latency",
+        "unit": "µs",
+        "group": "latency",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 67794.2,
+        "median": 71039,
+        "min": 57215,
+        "max": 73663,
+        "stddev": 7104.922462631102,
+        "cv": 0.10480133201116175,
+        "ci95_low": 62609.4,
+        "ci95_high": 72961.23999999999,
+        "ci_status": "ok"
+      },
+      "read_errors": {
+        "key": "read_errors",
+        "label": "Read errors",
+        "unit": "",
+        "group": "reliability",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "stddev": 0,
+        "ci95_low": 0,
+        "ci95_high": 0,
+        "ci_status": "ok"
+      },
+      "receive_rate": {
+        "key": "receive_rate",
+        "label": "Receive rate",
+        "unit": "msg/s",
+        "group": "throughput",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 11193.383468356236,
+        "median": 11189.915083706688,
+        "min": 11187.344653554732,
+        "max": 11202.53908151548,
+        "stddev": 6.400052686930004,
+        "cv": 0.0005717710560906801,
+        "ci95_low": 11188.693805066187,
+        "ci95_high": 11198.49743633966,
+        "ci_status": "ok"
+      },
+      "rss_mb": {
+        "key": "rss_mb",
+        "label": "Server RSS",
+        "unit": "MB",
+        "group": "resource",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 33.7048828125,
+        "median": 35.11067708333333,
+        "min": 29.336263020833332,
+        "max": 35.306315104166664,
+        "stddev": 2.5479392586405933,
+        "cv": 0.07559555310768351,
+        "ci95_low": 31.355989583333333,
+        "ci95_high": 35.235416666666666,
+        "ci_status": "ok"
+      },
+      "send_rate": {
+        "key": "send_rate",
+        "label": "Send rate",
+        "unit": "msg/s",
+        "group": "throughput",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 115.77765275502932,
+        "median": 115.7417778620882,
+        "min": 115.71519087251481,
+        "max": 115.87235293251429,
+        "stddev": 0.06619831078744845,
+        "cv": 0.0005717710560907258,
+        "ci95_low": 115.73047727333469,
+        "ci95_high": 115.83054857612392,
+        "ci_status": "ok"
+      },
+      "write_errors": {
+        "key": "write_errors",
+        "label": "Write errors",
+        "unit": "",
+        "group": "reliability",
+        "total_rep": 5,
+        "samples": 5,
+        "measured": true,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "stddev": 0,
+        "ci95_low": 0,
+        "ci95_high": 0,
+        "ci_status": "ok"
+      }
+    },
+    "stability": "moderate",
+    "stability_note": "stability keyed on p90 latency CV"
+  }
+}
