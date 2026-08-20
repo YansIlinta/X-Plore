@@ -31,6 +31,13 @@ type Hub struct {
 	// Uplink 由 comet 注入：readPump 收到一条弹幕就回调它（转发给 Logic）。
 	Uplink func(uid, roomID, content string, clientTS, clientTSNano, offsetMS int64)
 
+	// OnConnectionAdded/OnConnectionRemoved 是连接生命周期旁路 hook。
+	// 它们在本地索引完成变更后同步调用，因此 hook 必须是非阻塞的；Phase 3
+	// RouteStore 通过 LeaseManager 只做内存 Track/Untrack，再由单 worker 异步 I/O。
+	// 未配置时为 nil，Phase 1/2 与旧 Danmu 路径零行为变化。
+	OnConnectionAdded   func(*Client)
+	OnConnectionRemoved func(*Client)
+
 	// ConnectionPolicy 决定同一用户的连接并存语义（默认 PolicyMultiDevice）。
 	ConnectionPolicy SessionPolicy
 
@@ -71,14 +78,13 @@ func NewHub(serverID string, ctx context.Context) *Hub {
 func (h *Hub) Context() context.Context { return h.ctx }
 
 // roomChannel 把 roomID 映射为内部 channel key（Room Broadcast 兼容层）。
-func (h *Hub) roomChannel(roomID string) string { return "danmu:room:" + roomID }
+func (h *Hub) roomChannel(roomID string) string { return DanmuChannelID(roomID) }
 
 // channelRoom 内部 channel key 反向还原 roomID；非 danmu:room: 前缀的 channel 原样返回
 // （Phase 2/3 引入通用 Channel 目标后，这里承载无缝扩展）。
 func (h *Hub) channelRoom(channel string) string {
-	const prefix = "danmu:room:"
-	if len(channel) > len(prefix) && channel[:len(prefix)] == prefix {
-		return channel[len(prefix):]
+	if roomID, ok := DanmuRoomID(channel); ok {
+		return roomID
 	}
 	return channel
 }
@@ -113,6 +119,9 @@ func (h *Hub) AddClient(c *Client) {
 	h.sessions.Add(c)
 	h.subs.Subscribe(h.roomChannel(c.RoomID), c)
 	MetricConnInc()
+	if h.OnConnectionAdded != nil {
+		h.OnConnectionAdded(c)
+	}
 }
 
 // RemoveClient 连接断开清理：从三个索引全部移除（幂等；未登记的连接空跑不递减）。
@@ -122,6 +131,9 @@ func (h *Hub) RemoveClient(c *Client) {
 	}
 	h.sessions.Remove(c)
 	h.subs.RemoveConn(c)
+	if h.OnConnectionRemoved != nil {
+		h.OnConnectionRemoved(c)
+	}
 }
 
 // BroadcastToRoom 向房间对应 channel 的所有连接非阻塞下发；sendCh 满则丢弃并计数。

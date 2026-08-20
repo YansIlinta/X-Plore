@@ -10,6 +10,9 @@ on:
       - "danmu/distributed/**"
       - ".github/workflows/distributed-go.yml"
 
+permissions:
+  contents: read
+
 jobs:
   go-test:
     runs-on: ubuntu-latest
@@ -22,8 +25,45 @@ jobs:
         with:
           go-version-file: danmu/distributed/go.mod
           cache-dependency-path: danmu/distributed/go.sum
+      - name: Verify module metadata is normalized
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - run: go test ./...
       - run: go vet ./...
+
+  redis-route-integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: danmu/distributed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: danmu/distributed/go.mod
+          cache-dependency-path: danmu/distributed/go.sum
+      - name: Verify module metadata is normalized
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Run Redis routing integration tests
+        env:
+          DANMU_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: >-
+          go test ./routing ./comet
+          -run '^(TestRedisStoreIntegration|TestRouteLeaseIntegration)$'
+          -count=1 -v
 
   proto-generate:
     runs-on: ubuntu-latest
@@ -36,6 +76,10 @@ jobs:
         with:
           go-version-file: danmu/distributed/go.mod
           cache-dependency-path: danmu/distributed/go.sum
+      - name: Verify module metadata is normalized
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install Go protobuf plugins

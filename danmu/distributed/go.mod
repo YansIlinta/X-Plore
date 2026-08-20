@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.23.2
+	github.com/redis/go-redis/v9 v9.4.0
 	github.com/segmentio/kafka-go v0.4.47
 	go.etcd.io/etcd/client/pkg/v3 v3.7.1
 	go.etcd.io/etcd/client/v3 v3.7.1
@@ -16,6 +17,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

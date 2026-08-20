@@ -41,9 +41,9 @@ var tracer *core.TraceRecorder
 // 观测计数器（HTTP /api/v1/stats）。单进程单实例，用包级原子计数最省事。
 var (
 	statConsumed  atomic.Int64 // 消费 Kafka 消息数
-	statPushOK    atomic.Int64 // PushRoom RPC 成功次数
-	statPushErr   atomic.Int64 // PushRoom RPC 失败次数
-	statDelivered atomic.Int64 // PushRoomResp.delivered 累计投递数
+	statPushOK    atomic.Int64 // PushRoom / PushEnvelope RPC 成功次数
+	statPushErr   atomic.Int64 // PushRoom / PushEnvelope RPC 失败次数
+	statDelivered atomic.Int64 // RPC delivered 累计投递数
 )
 
 // cometPool 维护到各 comet 的 gRPC 连接。地址集合来自 etcd watch
@@ -138,7 +138,7 @@ func (p *cometPool) pushRoom(roomID string, payload []byte, traceIDs []string) {
 	// 扇出完成才记 span：一条 msg 对应一条 job.push，detail 汇总本次扇出结果。
 	if len(traceIDs) > 0 {
 		now := time.Now().UnixNano()
-		detail := "comets=" + strconv.Itoa(len(clients)) + " delivered=" + strconv.FormatInt(delivered, 10)
+		detail := "mode=broadcast_all comets=" + strconv.Itoa(len(clients)) + " delivered=" + strconv.FormatInt(delivered, 10)
 		for _, id := range traceIDs {
 			tracer.Record(id, core.HopJobPush, roomID, detail, now)
 		}
@@ -162,6 +162,7 @@ func main() {
 	etcdEndpoints := flag.String("etcd", "localhost:2379", "etcd 客户端端点(逗号分隔)")
 	httpAddr := flag.String("http-addr", ":7420", "HTTP 观测 listen address（/health、/api/v1/stats）")
 	advertiseHTTP := flag.String("advertise-http", "", "对外可达的 HTTP 观测地址(host:port)，默认 localhost + http-addr 端口")
+	fanoutMode := flag.String("fanout-mode", fanoutBroadcastAll, "fanout mode: broadcast_all (legacy baseline) or route_aware")
 	traceRate := flag.Uint("trace-sample", 100, "消息 trace 采样率：1/N 采样，0=关闭。须与 logic 一致才有意义")
 	traceBuf := flag.Int("trace-buffer", 512, "trace span 环形缓冲条数")
 	flag.Parse()
@@ -181,6 +182,12 @@ func main() {
 	}
 	defer etcdCli.Close()
 	go etcdreg.Watch(ctx, etcdCli, "comet", pool.apply)
+
+	routedFanout, closeRouteFanout, err := setupRouteFanout(ctx, *fanoutMode, pool)
+	if err != nil {
+		log.Fatalf("[job] fanout setup: %v", err)
+	}
+	defer closeRouteFanout()
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        splitComma(*kafkaBrokers),
@@ -205,15 +212,20 @@ func main() {
 		runtime.ReadMemStats(&mem)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"server_id":       "job",
-			"uptime_ms":       time.Since(startTime).Milliseconds(),
-			"consumed_total":  statConsumed.Load(),
-			"push_ok_total":   statPushOK.Load(),
-			"push_err_total":  statPushErr.Load(),
-			"delivered_total": statDelivered.Load(),
-			"comets":          pool.addrs(),
-			"goroutines":      runtime.NumGoroutine(),
-			"heap_mb":         mem.HeapAlloc / 1024 / 1024,
+			"server_id":                "job",
+			"uptime_ms":                time.Since(startTime).Milliseconds(),
+			"fanout_mode":               *fanoutMode,
+			"consumed_total":            statConsumed.Load(),
+			"push_ok_total":             statPushOK.Load(),
+			"push_err_total":            statPushErr.Load(),
+			"delivered_total":           statDelivered.Load(),
+			"route_resolve_err_total":   statRouteResolveErr.Load(),
+			"route_candidates_total":    statRouteCandidates.Load(),
+			"route_rpc_total":           statRouteRPC.Load(),
+			"route_missing_comet_total": statRouteMissing.Load(),
+			"comets":                    pool.addrs(),
+			"goroutines":                runtime.NumGoroutine(),
+			"heap_mb":                   mem.HeapAlloc / 1024 / 1024,
 		})
 	})
 	httpMux.HandleFunc("/api/v1/traces", func(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +252,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() { <-sigCh; log.Println("[job] shutdown"); cancel() }()
 
-	log.Printf("[job] consuming %s, etcd=%s", *kafkaTopic, *etcdEndpoints)
+	log.Printf("[job] consuming %s, etcd=%s fanout_mode=%s", *kafkaTopic, *etcdEndpoints, *fanoutMode)
 
 	// 按房间聚合一个 flushWindow 的消息再推，减少 RPC 次数（对齐单体的 worker 批聚合）。
 	roomBatch := make(map[string]*batch)
@@ -250,7 +262,11 @@ func main() {
 	flush := func() {
 		for roomID, b := range roomBatch {
 			payload := buildArray(b.values)
-			pool.pushRoom(roomID, payload, b.traceIDs)
+			if routedFanout != nil {
+				routedFanout.pushRoom(roomID, payload, b.traceIDs)
+			} else {
+				pool.pushRoom(roomID, payload, b.traceIDs)
+			}
 			delete(roomBatch, roomID)
 		}
 	}
