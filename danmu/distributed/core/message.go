@@ -90,12 +90,18 @@ const (
 // delivery paths. It is not itself a reliability guarantee: DeliveryReliable
 // becomes meaningful only after persistence, idempotency, sequencing, sync and
 // client ACK are connected in later phases.
+//
+// Device IDs are scoped by user in the Phase 1 SessionIndex, so DEVICE targets
+// carry both TargetUserID and TargetID (the device ID). This avoids treating a
+// device ID as globally unique when the connection kernel does not make that
+// guarantee.
 type MessageEnvelope struct {
 	MessageID       string          `json:"message_id,omitempty"`
 	ClientMessageID string          `json:"client_message_id,omitempty"`
 	SenderID        string          `json:"sender_id,omitempty"`
 	TargetType      TargetType      `json:"target_type"`
 	TargetID        string          `json:"target_id,omitempty"`
+	TargetUserID    string          `json:"target_user_id,omitempty"`
 	DeliveryClass   DeliveryClass   `json:"delivery_class"`
 	MessageType     MessageType     `json:"message_type"`
 	Sequence        int64           `json:"sequence,omitempty"`
@@ -106,9 +112,16 @@ type MessageEnvelope struct {
 
 func (m MessageEnvelope) Validate() error {
 	switch m.TargetType {
-	case TargetUser, TargetDevice, TargetChannel:
+	case TargetUser, TargetChannel:
 		if strings.TrimSpace(m.TargetID) == "" {
-			return errors.New("target_id is required for USER/DEVICE/CHANNEL target")
+			return errors.New("target_id is required for USER/CHANNEL target")
+		}
+	case TargetDevice:
+		if strings.TrimSpace(m.TargetID) == "" {
+			return errors.New("target_id is required for DEVICE target")
+		}
+		if strings.TrimSpace(m.TargetUserID) == "" {
+			return errors.New("target_user_id is required for DEVICE target")
 		}
 	case TargetBroadcast:
 		// Global broadcast intentionally permits an empty target_id.
