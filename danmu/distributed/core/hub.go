@@ -230,26 +230,35 @@ func (h *Hub) GetDeviceConnections(uid, deviceID string) []*Client {
 
 // PushUser 定向推送给某用户的全部连接（本机范围）。
 func (h *Hub) PushUser(uid string, data []byte) int {
-	delivered := 0
+	delivered, dropped := 0, 0
 	for _, c := range h.sessions.GetUserConnections(uid) {
 		if c.TrySend(data) {
 			delivered++
+		} else {
+			dropped++
 		}
 	}
-	if delivered == 0 {
-		return 0
+	if dropped > 0 {
+		MetricDropped(dropped)
 	}
-	MetricMsgOut(delivered)
+	if delivered > 0 {
+		MetricMsgOut(delivered)
+	}
 	return delivered
 }
 
 // PushDevice 定向推送给某用户指定设备的连接（本机范围）。
 func (h *Hub) PushDevice(uid, deviceID string, data []byte) int {
-	delivered := 0
+	delivered, dropped := 0, 0
 	for _, c := range h.sessions.GetDeviceConnections(uid, deviceID) {
 		if c.TrySend(data) {
 			delivered++
+		} else {
+			dropped++
 		}
+	}
+	if dropped > 0 {
+		MetricDropped(dropped)
 	}
 	if delivered > 0 {
 		MetricMsgOut(delivered)
